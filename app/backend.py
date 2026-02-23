@@ -1,4 +1,3 @@
-
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,9 +31,6 @@ class RAGResponse(BaseModel):
     similarity_scores: List[float]
 
 
-# ============================================================================
-# RETRIEVAL COMPONENT
-# ============================================================================
 class RetrievalComponent:
     """Vector-based document retrieval system using TF-IDF"""
     

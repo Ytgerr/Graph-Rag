@@ -2,11 +2,43 @@
 
 A simple RAG system with FastAPI backend and Gradio frontend.
 
+## Installation
+
+### 1. Install uv
+
+`uv` is a fast Python package manager.
+
+**Option A - Official installer (recommended):**
+
+**Windows:**
+```bash
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+**Mac/Linux:**
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+**Option B - Using pip:**
+```bash
+pip install uv
+```
+
+Or download from: https://github.com/astral-sh/uv/releases
+
+### 2. Install project dependencies
+
+```bash
+uv sync
+```
+
+
 ## Quick Start
 
 ### 1. Create .env file
 
-Create a `.env` file in the project root and add API keys from report:
+Create a `.env` file in the project root and add your API key:
 
 ```
 OPENAI_API_KEY=sk-your-api-key-here
