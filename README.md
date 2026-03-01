@@ -42,9 +42,9 @@ Create a `.env` file in the project root and add your API key:
 
 ```
 OPENAI_API_KEY=sk-your-api-key-here
-DEEPLAKE_API_KEY=sk-your-api-key-here
 
 ```
+Also you need use some proxy(VPN).
 
 ### 2. Run both services
 
