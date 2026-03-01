@@ -10,6 +10,23 @@ from openai import OpenAI
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
+import spacy
+import nltk
+from nltk.corpus import wordnet
+from collections import Counter
+import sys
+import subprocess
+
+try:
+    nltk.data.find('corpora/wordnet')
+except LookupError:
+    nltk.download('wordnet')
+
+# Load spacy model
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"], check=False)
 
 
 logging.basicConfig(level=logging.INFO)
@@ -23,12 +40,91 @@ class QueryRequest(BaseModel):
     top_k: int = 5
     temperature: float = 0.2
     model: str = "openai/gpt-4o-mini"
+    similarity_type: str = "enhanced"  
 
 
 class RAGResponse(BaseModel):
     answer: str
     sources: List[str]
     similarity_scores: List[float]
+
+
+def get_synonyms(word):
+    """Get synonyms for a word using WordNet"""
+    synonyms = set()
+    for syn in wordnet.synsets(word):
+        for lemma in syn.lemmas():
+            synonyms.add(lemma.name())
+    return synonyms
+
+
+def preprocess_text(text):
+    """Preprocess text: lowercase, lemmatization, remove stopwords and punctuation"""
+    doc = nlp(text.lower())
+    lemmatized_words = []
+    for token in doc:
+        if token.is_stop or token.is_punct:
+            continue
+        lemmatized_words.append(token.lemma_)
+    return lemmatized_words
+
+
+def expand_with_synonyms(words):
+    """Expand words with their synonyms"""
+    expanded_words = words.copy()
+    for word in words:
+        expanded_words.extend(get_synonyms(word))
+    return expanded_words
+
+
+def calculate_enhanced_similarity(text1, text2):
+    """Calculate enhanced similarity using lemmatization and synonym expansion"""
+    words1 = preprocess_text(text1)
+    words2 = preprocess_text(text2)
+
+    # Expand with synonyms
+    words1_expanded = expand_with_synonyms(words1)
+    words2_expanded = expand_with_synonyms(words2)
+
+    # Count word frequencies
+    freq1 = Counter(words1_expanded)
+    freq2 = Counter(words2_expanded)
+
+    # Create a set of all unique words
+    unique_words = set(freq1.keys()).union(set(freq2.keys()))
+
+    # Create frequency vectors
+    vector1 = [freq1[word] for word in unique_words]
+    vector2 = [freq2[word] for word in unique_words]
+
+    # Convert lists to numpy arrays
+    vector1 = np.array(vector1)
+    vector2 = np.array(vector2)
+
+    # Calculate cosine similarity
+    norm1 = np.linalg.norm(vector1)
+    norm2 = np.linalg.norm(vector2)
+    
+    if norm1 == 0 or norm2 == 0:
+        return 0.0
+    
+    cosine_sim = np.dot(vector1, vector2) / (norm1 * norm2)
+    return float(cosine_sim)
+
+
+def calculate_cosine_similarity(text1, text2):
+    """Calculate standard TF-IDF cosine similarity"""
+    vectorizer = TfidfVectorizer(
+        stop_words='english',
+        use_idf=True,
+        norm='l2',
+        ngram_range=(1, 2),
+        sublinear_tf=True,
+        analyzer='word'
+    )
+    tfidf = vectorizer.fit_transform([text1, text2])
+    similarity = cosine_similarity(tfidf[0:1], tfidf[1:2])
+    return float(similarity[0][0])
 
 
 class RetrievalComponent:
@@ -53,13 +149,22 @@ class RetrievalComponent:
         self.tfidf_matrix = self.vectorizer.fit_transform(records)
         logger.info(f"Fitted retrieval component with {len(records)} documents")
     
-    def retrieve_top_k(self, query: str, k: int = 5) -> tuple[List[str], List[float]]:
+    def retrieve_top_k(self, query: str, k: int = 5, similarity_type: str = "enhanced") -> tuple[List[str], List[float]]:
         """Retrieve top-k most similar documents"""
         if self.tfidf_matrix is None:
             raise ValueError("Retrieval component not fitted. Call fit() first.")
         
-        query_tfidf = self.vectorizer.transform([query])
-        similarities = cosine_similarity(query_tfidf, self.tfidf_matrix)[0]
+        if similarity_type == "enhanced":
+            # Use enhanced similarity with lemmatization and synonyms
+            similarities = []
+            for doc in self.documents:
+                sim = calculate_enhanced_similarity(query, doc)
+                similarities.append(sim)
+            similarities = np.array(similarities)
+        else:
+            # Use standard TF-IDF cosine similarity
+            query_tfidf = self.vectorizer.transform([query])
+            similarities = cosine_similarity(query_tfidf, self.tfidf_matrix)[0]
         
         # Get top-k indices
         top_indices = np.argsort(similarities)[-k:][::-1]
@@ -136,13 +241,14 @@ class RAGSystem:
         query: str,
         top_k: int = 5,
         temperature: float = 0.2,
-        model: str = "openai/gpt-4o-mini"
+        model: str = "openai/gpt-4o-mini",
+        similarity_type: str = "enhanced"
     ) -> RAGResponse:
         """Process a query through RAG pipeline"""
         
         try:
 
-            sources, scores = self.retriever.retrieve_top_k(query, k=top_k)
+            sources, scores = self.retriever.retrieve_top_k(query, k=top_k, similarity_type=similarity_type)
             context = "\n\n".join(sources)
             
 
@@ -227,7 +333,8 @@ async def query_rag(request: QueryRequest) -> RAGResponse:
             query=request.query,
             top_k=request.top_k,
             temperature=request.temperature,
-            model=request.model
+            model=request.model,
+            similarity_type=request.similarity_type
         )
         return response
     except Exception as e:

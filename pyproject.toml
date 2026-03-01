@@ -12,6 +12,10 @@ dependencies = [
   "openai",
   "scikit-learn",
   "numpy",
+  "scipy",
+  "pandas",
+  "nltk",
+  "spacy",
 ]
 
 [project.scripts]

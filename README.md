@@ -65,7 +65,7 @@ Opens at `http://localhost:7860`
 ## Using the system
 
 1. Open in browser: **http://localhost:7860**
-2. Enter your question in the input field
+2. Enter your question about AI and RAG theme in the input field 
 3. The system will find relevant documents and provide an answer
 4. Use the settings button to adjust parameters (Top-K, Temperature)
 
@@ -75,7 +75,7 @@ Opens at `http://localhost:7860`
 
 - **Top-K** - number of similar documents to use (1-20)
 - **Temperature** - answer creativity (0.0 = precise, 1.0 = creative)
-
+- **Retrieval metrics ** - simple cosine similarity or enchanced cosine similarity with spacy
 ---
 
 ## API Documentation

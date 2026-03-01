@@ -1,5 +1,6 @@
 .env
 .env.*
-myevn
+myenv
 rag_system.egg-info
 __pycache__
+.venv

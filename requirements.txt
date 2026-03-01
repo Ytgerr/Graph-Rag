@@ -1,0 +1,12 @@
+nltk
+openai
+dotenv
+scipy
+numpy
+pandas
+scikit-learn
+fastapi
+uvicorn
+gradio
+requests
+spacy

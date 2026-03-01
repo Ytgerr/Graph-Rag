@@ -19,7 +19,8 @@ def chat_send(message, history, rag_state):
                 "query": message,
                 "top_k": rag_state.get("top_k", 5),
                 "temperature": rag_state.get("temperature", 0.2),
-                "model": rag_state.get("model", "openai/gpt-4o-mini")
+                "model": rag_state.get("model", "openai/gpt-4o-mini"),
+                "similarity_type": rag_state.get("similarity_type", "enhanced")
             },
             timeout=30
         )
@@ -217,7 +218,7 @@ body { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
 """
 
 with gr.Blocks(title=TITLE) as demo:
-    rag_state = gr.State({"top_k": 5, "temperature": 0.2, "model": "openai/gpt-4o-mini"})
+    rag_state = gr.State({"top_k": 5, "temperature": 0.2, "model": "openai/gpt-4o-mini", "similarity_type": "enhanced"})
     settings_open = gr.State(False)
 
     settings_btn = gr.Button("⚙️", elem_id="settings_btn", scale=0)
@@ -227,6 +228,11 @@ with gr.Blocks(title=TITLE) as demo:
         top_k = gr.Slider(1, 20, value=5, step=1, label=" Context (Top-K)")
         temperature = gr.Slider(0.0, 1.0, value=0.2, step=0.05, label=" Temperature")
         model_name = gr.Textbox(value="openai/gpt-4o-mini", label=" Model")
+        similarity_type = gr.Radio(
+            choices=["enhanced", "cosine"],
+            value="enhanced",
+            label=" Similarity Type"
+        )
         close_settings_btn = gr.Button("✕ Close", elem_id="close_settings_btn")
 
     with gr.Column(elem_id="main_col"):
@@ -258,16 +264,18 @@ with gr.Blocks(title=TITLE) as demo:
     settings_btn.click(toggle_settings, inputs=[settings_open], outputs=[settings_panel, settings_open])
     close_settings_btn.click(lambda: (gr.update(visible=False), False), outputs=[settings_panel, settings_open])
 
-    def update_state(top_k, temperature, model, state):
+    def update_state(top_k, temperature, model, sim_type, state):
         state = dict(state or {})
         state["top_k"] = int(top_k)
         state["temperature"] = float(temperature)
         state["model"] = model
+        state["similarity_type"] = sim_type
         return state
 
-    top_k.change(update_state, inputs=[top_k, temperature, model_name, rag_state], outputs=[rag_state])
-    temperature.change(update_state, inputs=[top_k, temperature, model_name, rag_state], outputs=[rag_state])
-    model_name.change(update_state, inputs=[top_k, temperature, model_name, rag_state], outputs=[rag_state])
+    top_k.change(update_state, inputs=[top_k, temperature, model_name, similarity_type, rag_state], outputs=[rag_state])
+    temperature.change(update_state, inputs=[top_k, temperature, model_name, similarity_type, rag_state], outputs=[rag_state])
+    model_name.change(update_state, inputs=[top_k, temperature, model_name, similarity_type, rag_state], outputs=[rag_state])
+    similarity_type.change(update_state, inputs=[top_k, temperature, model_name, similarity_type, rag_state], outputs=[rag_state])
 
     send_btn.click(chat_send, inputs=[msg, chatbot, rag_state], outputs=[chatbot, sources]).then(lambda: "", None, msg)
     msg.submit(chat_send, inputs=[msg, chatbot, rag_state], outputs=[chatbot, sources]).then(lambda: "", None, msg)
