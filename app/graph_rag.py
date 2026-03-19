@@ -1,9 +1,3 @@
-"""
-Graph RAG Implementation
-Combines knowledge graph construction with vector-based retrieval
-Based on best practices from RAG and Generative AI literature
-"""
-
 import logging
 from typing import List, Dict, Tuple, Optional, Set
 import numpy as np
@@ -92,8 +86,7 @@ class KnowledgeGraph:
                 existing_rel.strengthen(doc_id)
                 self.graph[relation.source.text][relation.target.text]['weight'] = existing_rel.weight
                 return
-        
-        # Add new relation
+
         self.relations.append(relation)
         if not self.graph.has_edge(relation.source.text, relation.target.text):
             self.graph.add_edge(
@@ -114,7 +107,6 @@ class KnowledgeGraph:
         for _ in range(max_depth):
             next_level = set()
             for node in current_level:
-                # Get successors and predecessors
                 next_level.update(self.graph.successors(node))
                 next_level.update(self.graph.predecessors(node))
             neighbors.update(next_level)
@@ -159,13 +151,11 @@ class GraphExtractor:
     def __init__(self, nlp_model=None):
         self.nlp = nlp_model or spacy.load("en_core_web_sm")
         
-        # Entity types to extract
         self.entity_types = {
             'PERSON', 'ORG', 'GPE', 'PRODUCT', 'EVENT', 
             'WORK_OF_ART', 'LAW', 'LANGUAGE', 'NORP'
         }
-        
-        # Dependency patterns for relation extraction
+  
         self.relation_patterns = [
             ('nsubj', 'dobj'),      # subject-verb-object
             ('nsubj', 'attr'),      # subject-verb-attribute
@@ -177,14 +167,12 @@ class GraphExtractor:
         """Extract named entities from text"""
         doc = self.nlp(text)
         entities = []
-        
-        # Extract named entities
+
         for ent in doc.ents:
             if ent.label_ in self.entity_types:
                 entity = Entity(ent.text, ent.label_, doc_id)
                 entities.append(entity)
         
-        # Extract noun chunks as potential entities
         for chunk in doc.noun_chunks:
             # Filter out very short or very long chunks
             if 2 <= len(chunk.text.split()) <= 5:
@@ -238,11 +226,6 @@ class GraphExtractor:
 
 
 class GraphRAGRetriever:
-    """
-    Hybrid retrieval system combining:
-    1. Vector-based semantic search
-    2. Graph-based entity and relation traversal
-    """
     
     def __init__(self):
         self.knowledge_graph = KnowledgeGraph()
@@ -264,23 +247,19 @@ class GraphRAGRetriever:
         logger.info(f"Building knowledge graph from {len(documents)} documents...")
         self.documents = documents
         
-        # Extract entities and relations from each document
         for doc_id, doc_text in enumerate(documents):
             # Extract entities
             entities = self.graph_extractor.extract_entities(doc_text, doc_id)
             
-            # Add entities to graph
             added_entities = []
             for entity in entities:
                 added_entity = self.knowledge_graph.add_entity(entity, doc_id)
                 added_entities.append(added_entity)
             
-            # Extract and add relations
             relations = self.graph_extractor.extract_relations(doc_text, doc_id, added_entities)
             for relation in relations:
                 self.knowledge_graph.add_relation(relation, doc_id)
         
-        # Build TF-IDF matrix for vector search
         self.tfidf_matrix = self.vectorizer.fit_transform(documents)
         
         stats = self.knowledge_graph.get_graph_stats()
@@ -351,30 +330,15 @@ class GraphRAGRetriever:
         vector_weight: float = 0.6,
         graph_weight: float = 0.4
     ) -> Tuple[List[str], List[float], Dict]:
-        """
-        Hybrid retrieval combining vector and graph methods
-        
-        Args:
-            query: Search query
-            top_k: Number of documents to retrieve
-            vector_weight: Weight for vector similarity (0-1)
-            graph_weight: Weight for graph similarity (0-1)
-        
-        Returns:
-            Tuple of (documents, scores, metadata)
-        """
-        # Normalize weights
+
         total_weight = vector_weight + graph_weight
         vector_weight /= total_weight
         graph_weight /= total_weight
         
-        # Vector retrieval
         vector_doc_ids, vector_scores = self._vector_retrieve(query, top_k * 2)
         
-        # Graph retrieval
         graph_doc_ids, graph_scores = self._graph_retrieve(query, top_k * 2)
         
-        # Combine scores
         combined_scores = defaultdict(float)
         
         for doc_id, score in zip(vector_doc_ids, vector_scores):
@@ -383,11 +347,9 @@ class GraphRAGRetriever:
         for doc_id, score in zip(graph_doc_ids, graph_scores):
             combined_scores[doc_id] += graph_weight * score
         
-        # Sort by combined score
         sorted_results = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
         
         if not sorted_results:
-            # Fallback to vector only
             return (
                 [self.documents[i] for i in vector_doc_ids[:top_k]],
                 vector_scores[:top_k],
@@ -397,7 +359,6 @@ class GraphRAGRetriever:
         final_doc_ids = [doc_id for doc_id, _ in sorted_results]
         final_scores = [score for _, score in sorted_results]
         
-        # Gather metadata
         query_entities = self.graph_extractor.extract_entities(query, -1)
         metadata = {
             "method": "hybrid",

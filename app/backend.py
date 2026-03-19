@@ -10,12 +10,10 @@ from openai import OpenAI
 import sys
 import subprocess
 
-# Import Graph RAG components
 from app.graph_rag import GraphRAGRetriever
-from app.vector_store import VectorStore, OpenAIEmbedding, LocalEmbedding
+from app.vector_store import VectorStore, OpenAIEmbedding
 from app.document_processor import load_default_knowledge_base
 
-# Ensure required NLP resources
 import nltk
 import spacy
 
@@ -47,7 +45,7 @@ class QueryRequest(BaseModel):
     top_k: int = 5
     temperature: float = 0.2
     model: str = "openai/gpt-4o-mini"
-    retrieval_mode: str = "graph_rag"  # "graph_rag", "vector", "hybrid"
+    retrieval_mode: str = "graph_rag" 
     use_entity_context: bool = True
 
 
@@ -66,7 +64,6 @@ class SystemStats(BaseModel):
 
 
 class LLMComponent:
-    """OpenAI/OpenRouter LLM interface"""
     
     def __init__(self, api_key: Optional[str] = None):
         api_key = api_key or os.getenv("OPENAI_API_KEY")
@@ -130,7 +127,6 @@ ANSWER:"""
 
 
 class GraphRAGSystem:
-    """Complete Graph RAG system with multiple retrieval modes"""
     
     def __init__(self, documents: List[str], use_embeddings: bool = False):
         self.documents = documents
@@ -150,10 +146,10 @@ class GraphRAGSystem:
                 self.vector_store.add_documents(documents)
                 logger.info("Vector store initialized successfully")
             except Exception as e:
-                logger.warning(f"Failed to initialize embeddings: {e}. Using TF-IDF fallback.")
+                logger.warning(f"Failed to initialize embeddings: {e}")
+                logger.warning("Continuing without vector store - only graph-based retrieval will be available")
                 self.vector_store = None
         
-        # Initialize LLM
         self.llm = LLMComponent()
         
         logger.info("Graph RAG system initialized successfully")
@@ -186,13 +182,11 @@ class GraphRAGSystem:
                 metadata = {"method": "vector_only"}
             
             elif retrieval_mode == "hybrid" and self.vector_store:
-                # Combine Graph RAG with vector store
                 graph_sources, graph_scores, graph_meta = self.graph_retriever.hybrid_retrieve(
                     query, top_k=top_k
                 )
                 vector_sources, vector_scores, _ = self.vector_store.similarity_search(query, top_k)
                 
-                # Merge results
                 combined = {}
                 for src, score in zip(graph_sources, graph_scores):
                     combined[src] = score * 0.6
@@ -208,13 +202,10 @@ class GraphRAGSystem:
                 metadata = {"method": "full_hybrid"}
             
             else:
-                # Fallback to graph RAG
                 sources, scores, metadata = self.graph_retriever.hybrid_retrieve(query, top_k=top_k)
-            
-            # Build context from sources
+
             context = "\n\n".join(sources)
             
-            # Get entity context if enabled
             entity_context = ""
             if use_entity_context:
                 entity_context = self.graph_retriever.get_entity_context(query, max_entities=10)
@@ -240,7 +231,6 @@ class GraphRAGSystem:
             raise
 
 
-# Initialize FastAPI app
 app = FastAPI(
     title="Graph RAG System API",
     version="2.0.0",
@@ -255,7 +245,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize RAG system
 rag_system = None
 
 try:
@@ -264,8 +253,15 @@ try:
     
     logger.info(f"Initializing Graph RAG system with {len(documents)} documents...")
     
-    # Try to use embeddings, fallback to TF-IDF if not available
-    use_embeddings = bool(os.getenv("OPENAI_API_KEY"))
+    # Embeddings используют официальный OpenAI API (NOT OpenRouter)
+    # OpenRouter не поддерживает embeddings endpoint, только LLM calls
+    # Для включения embeddings: ENABLE_EMBEDDINGS=true
+    use_embeddings = os.getenv("ENABLE_EMBEDDINGS", "false").lower() == "true"
+    if use_embeddings:
+        logger.info("Embeddings explicitly enabled - will use official OpenAI API for embeddings")
+    else:
+        logger.info("Using graph-based retrieval only (embeddings disabled by default)")
+    
     rag_system = GraphRAGSystem(documents, use_embeddings=use_embeddings)
     
     logger.info("Graph RAG system ready!")
@@ -332,7 +328,6 @@ async def get_entities(limit: int = 50):
     
     entities = rag_system.graph_retriever.knowledge_graph.entities
     
-    # Sort by frequency
     sorted_entities = sorted(
         entities.values(),
         key=lambda e: e.frequency,
@@ -386,8 +381,7 @@ def main():
         "app.backend:app",
         host="0.0.0.0",
         port=8000,
-        log_level="info",
-        reload=True,
+        log_level="info"
     )
 
 

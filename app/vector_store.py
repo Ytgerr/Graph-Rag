@@ -1,8 +1,3 @@
-"""
-Vector Store Implementation with Embeddings
-Supports multiple embedding models and efficient similarity search
-"""
-
 import logging
 from typing import List, Dict, Tuple, Optional
 import numpy as np
@@ -16,21 +11,17 @@ logger = logging.getLogger(__name__)
 
 
 class EmbeddingModel:
-    """Base class for embedding models"""
     
     def embed(self, texts: List[str]) -> np.ndarray:
-        """Generate embeddings for texts"""
         raise NotImplementedError
     
     def embed_query(self, query: str) -> np.ndarray:
-        """Generate embedding for a single query"""
         return self.embed([query])[0]
 
 
 class OpenAIEmbedding(EmbeddingModel):
-    """OpenAI embedding model"""
     
-    def __init__(self, model: str = "text-embedding-3-small", api_key: Optional[str] = None):
+    def __init__(self, model: str = "openai/text-embedding-3-small", api_key: Optional[str] = None):
         self.model = model
         api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not api_key:
@@ -40,60 +31,38 @@ class OpenAIEmbedding(EmbeddingModel):
             api_key=api_key,
             base_url="https://openrouter.ai/api/v1"
         )
-        logger.info(f"Initialized OpenAI embedding model: {model}")
+        logger.info(f"Initialized OpenAI embedding model: {model} (using OpenRouter API)")
     
     def embed(self, texts: List[str]) -> np.ndarray:
         """Generate embeddings for multiple texts"""
         try:
-            # OpenRouter/OpenAI API supports batch embedding
             response = self.client.embeddings.create(
                 model=self.model,
                 input=texts
             )
             
+            logger.debug(f"API Response: {response}")
+            logger.debug(f"Response data: {response.data}")
+            
+            if not response.data:
+                logger.error(f"complete response object: {response}")
+                raise ValueError(f"No embedding data in response.")
+            
             embeddings = [item.embedding for item in response.data]
+            if not embeddings:
+                raise ValueError("Failed to extract embeddings from response data")
+            
+            logger.info(f"Successfully generated {len(embeddings)} embeddings")
             return np.array(embeddings)
         
         except Exception as e:
             logger.error(f"Embedding generation failed: {e}")
-            # Fallback to simple TF-IDF-like representation
-            logger.warning("Falling back to TF-IDF representation")
-            from sklearn.feature_extraction.text import TfidfVectorizer
-            vectorizer = TfidfVectorizer(max_features=1536)
-            embeddings = vectorizer.fit_transform(texts).toarray()
-            return embeddings
-
-
-class LocalEmbedding(EmbeddingModel):
-    """Local embedding using sentence transformers (fallback)"""
-    
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        try:
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(model_name)
-            logger.info(f"Initialized local embedding model: {model_name}")
-        except ImportError:
-            logger.warning("sentence-transformers not installed, using TF-IDF fallback")
-            self.model = None
-    
-    def embed(self, texts: List[str]) -> np.ndarray:
-        """Generate embeddings for multiple texts"""
-        if self.model is None:
-            # Fallback to TF-IDF
-            from sklearn.feature_extraction.text import TfidfVectorizer
-            vectorizer = TfidfVectorizer(max_features=384)
-            embeddings = vectorizer.fit_transform(texts).toarray()
-            return embeddings
-        
-        return self.model.encode(texts, show_progress_bar=False)
+            logger.error(f"Model: {self.model}, Texts count: {len(texts)}")
+            raise
 
 
 class VectorStore:
-    """
-    Vector store for efficient similarity search
-    Supports multiple embedding models and persistence
-    """
-    
+
     def __init__(
         self, 
         embedding_model: Optional[EmbeddingModel] = None,
@@ -118,14 +87,11 @@ class VectorStore:
         
         logger.info(f"Adding {len(documents)} documents to vector store...")
         
+        if not self.embedding_model:
+            raise ValueError("Embedding model must be initialized to add documents")
+        
         # Generate embeddings
-        if self.embedding_model:
-            new_embeddings = self.embedding_model.embed(documents)
-        else:
-            # Use TF-IDF as fallback
-            from sklearn.feature_extraction.text import TfidfVectorizer
-            vectorizer = TfidfVectorizer(max_features=self.dimension)
-            new_embeddings = vectorizer.fit_transform(documents).toarray()
+        new_embeddings = self.embedding_model.embed(documents)
         
         # Add to store
         if self.embeddings is None:
@@ -169,14 +135,10 @@ class VectorStore:
             return [], [], []
         
         # Generate query embedding
-        if self.embedding_model:
-            query_embedding = self.embedding_model.embed_query(query)
-        else:
-            # Fallback
-            from sklearn.feature_extraction.text import TfidfVectorizer
-            vectorizer = TfidfVectorizer(max_features=self.dimension)
-            vectorizer.fit(self.documents)
-            query_embedding = vectorizer.transform([query]).toarray()[0]
+        if not self.embedding_model:
+            raise ValueError("Embedding model must be initialized to perform search")
+        
+        query_embedding = self.embedding_model.embed_query(query)
         
         # Calculate similarities
         query_embedding = query_embedding.reshape(1, -1)

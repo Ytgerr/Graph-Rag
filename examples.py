@@ -1,8 +1,3 @@
-"""
-Graph RAG System - Usage Examples
-Demonstrates various features and capabilities
-"""
-
 import requests
 import json
 from typing import List, Dict
@@ -79,12 +74,12 @@ def example_system_stats():
     
     if response.status_code == 200:
         stats = response.json()
-        print(f"\n📊 System Status: {stats['status']}")
-        print(f"📄 Total Documents: {stats['num_documents']}")
+        print(f"\n  System Status: {stats['status']}")
+        print(f" Total Documents: {stats['num_documents']}")
         
         if stats.get('graph_stats'):
             gs = stats['graph_stats']
-            print(f"\n🕸️ Knowledge Graph:")
+            print(f"\n  Knowledge Graph:")
             print(f"   • Entities: {gs['num_entities']}")
             print(f"   • Relations: {gs['num_relations']}")
             print(f"   • Graph Nodes: {gs['num_nodes']}")
@@ -93,12 +88,12 @@ def example_system_stats():
         
         if stats.get('vector_stats'):
             vs = stats['vector_stats']
-            print(f"\n📦 Vector Store:")
+            print(f"\n  Vector Store:")
             print(f"   • Documents: {vs['num_documents']}")
             print(f"   • Embedding Dim: {vs['embedding_dimension']}")
             print(f"   • Size: {vs['total_size_mb']:.2f} MB")
     else:
-        print(f"❌ Error: {response.status_code}")
+        print(f" Error: {response.status_code}")
 
 
 def example_get_entities():

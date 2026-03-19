@@ -3,7 +3,7 @@ import requests
 import json
 from typing import Optional
 
-TITLE = "🔮 Graph RAG System"
+TITLE = " Graph RAG System"
 BACKEND_URL = "http://localhost:8000"
 
 def chat_send(message, history, rag_state):
@@ -36,7 +36,7 @@ def chat_send(message, history, rag_state):
             metadata = data.get("metadata", {})
             
             if sources:
-                sources_md = "## 📚 Retrieved Sources\n\n"
+                sources_md = "##  Retrieved Sources\n\n"
                 for i, (src, score) in enumerate(zip(sources, scores), 1):
                     truncated = src[:200] + "..." if len(src) > 200 else src
                     sources_md += f"**[{i}]** ({score:.1%} relevance)\n> {truncated}\n\n"
@@ -45,7 +45,7 @@ def chat_send(message, history, rag_state):
             
             # Format metadata
             if metadata:
-                metadata_md = "## 🔍 Retrieval Metadata\n\n"
+                metadata_md = "##  Retrieval Metadata\n\n"
                 metadata_md += f"- **Method**: {metadata.get('method', 'N/A')}\n"
                 
                 if 'query_entities' in metadata:
@@ -62,16 +62,16 @@ def chat_send(message, history, rag_state):
             else:
                 metadata_md = ""
         else:
-            answer = f"❌ Backend error: {response.status_code}"
+            answer = f" Backend error: {response.status_code}"
             sources_md = ""
             metadata_md = ""
     
     except requests.exceptions.ConnectionError:
-        answer = "❌ Cannot connect to backend at http://localhost:8000\n\nMake sure backend is running: `uv run backend`"
+        answer = " Cannot connect to backend at http://localhost:8000\n\nMake sure backend is running: `uv run backend`"
         sources_md = ""
         metadata_md = ""
     except Exception as e:
-        answer = f"❌ Error: {str(e)}"
+        answer = f" Error: {str(e)}"
         sources_md = ""
         metadata_md = ""
     
@@ -91,7 +91,7 @@ def get_system_stats():
         if response.status_code == 200:
             data = response.json()
             
-            stats_md = "## 📊 System Statistics\n\n"
+            stats_md = "##  System Statistics\n\n"
             stats_md += f"**Status**: {data.get('status', 'unknown')}\n\n"
             stats_md += f"**Documents**: {data.get('num_documents', 0)}\n\n"
             
@@ -113,9 +113,9 @@ def get_system_stats():
             
             return stats_md
         else:
-            return f"❌ Failed to fetch stats: {response.status_code}"
+            return f" Failed to fetch stats: {response.status_code}"
     except Exception as e:
-        return f"❌ Error: {str(e)}"
+        return f" Error: {str(e)}"
 
 CSS = r"""
 * { box-sizing: border-box; }
@@ -328,13 +328,13 @@ with gr.Blocks(title=TITLE, css=CSS) as demo:
         retrieval_mode = gr.Radio(
             choices=["graph_rag", "vector", "hybrid"],
             value="graph_rag",
-            label="🔍 Retrieval Mode",
+            label=" Retrieval Mode",
             info="graph_rag: Graph+Vector, vector: Vector only, hybrid: Full hybrid"
         )
         
         use_entity_context = gr.Checkbox(
             value=True,
-            label="🔗 Use Entity Context",
+            label=" Use Entity Context",
             info="Include knowledge graph entity relationships"
         )
         
@@ -359,7 +359,7 @@ with gr.Blocks(title=TITLE, css=CSS) as demo:
             metadata = gr.Markdown("", label="Metadata", elem_id="metadata")
 
         msg = gr.Textbox(
-            label="💬 Your Question",
+            label=" Your Question",
             placeholder="Ask about RAG, Graph RAG, or AI... (Enter to send, Shift+Enter for new line)",
             elem_id="msg",
             lines=2,
@@ -367,9 +367,9 @@ with gr.Blocks(title=TITLE, css=CSS) as demo:
         )
 
         with gr.Row():
-            send_btn = gr.Button("🚀 Send", variant="primary", elem_id="send_btn", scale=3)
-            clear_btn = gr.Button("🗑️ Clear", elem_id="clear_btn", scale=1)
-            stats_btn = gr.Button("📊 Stats", elem_id="stats_btn", scale=1)
+            send_btn = gr.Button(" Send", variant="primary", elem_id="send_btn", scale=3)
+            clear_btn = gr.Button(" Clear", elem_id="clear_btn", scale=1)
+            stats_btn = gr.Button(" Stats", elem_id="stats_btn", scale=1)
 
     # Settings toggle
     def toggle_settings(is_open):

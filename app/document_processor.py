@@ -1,8 +1,3 @@
-"""
-Document Processing Utilities
-Handles document loading, chunking, and preprocessing
-"""
-
 import logging
 from typing import List, Dict, Optional, Tuple
 import re
@@ -13,11 +8,6 @@ logger = logging.getLogger(__name__)
 
 
 class DocumentChunker:
-    """
-    Smart document chunking with overlap
-    Based on best practices from RAG literature
-    """
-    
     def __init__(
         self,
         chunk_size: int = 512,
@@ -29,16 +19,6 @@ class DocumentChunker:
         self.separator = separator
     
     def chunk_text(self, text: str, metadata: Optional[Dict] = None) -> List[Dict]:
-        """
-        Split text into overlapping chunks
-        
-        Args:
-            text: Text to chunk
-            metadata: Optional metadata to attach to each chunk
-        
-        Returns:
-            List of chunk dictionaries with text and metadata
-        """
         # Split by separator first
         sections = text.split(self.separator)
         
@@ -95,19 +75,16 @@ class DocumentChunker:
         return chunks
     
     def _split_sentences(self, text: str) -> List[str]:
-        """Split text into sentences"""
         # Simple sentence splitting
         sentences = re.split(r'(?<=[.!?])\s+', text)
         return [s.strip() for s in sentences if s.strip()]
     
     def _get_overlap(self, text: str) -> str:
-        """Get overlap text from end of chunk"""
         if len(text) <= self.chunk_overlap:
             return text
         return text[-self.chunk_overlap:]
     
     def _create_chunk(self, text: str, chunk_id: int, metadata: Optional[Dict]) -> Dict:
-        """Create chunk dictionary"""
         chunk = {
             "text": text,
             "chunk_id": chunk_id,
@@ -121,11 +98,9 @@ class DocumentChunker:
 
 
 class DocumentLoader:
-    """Load documents from various sources"""
     
     @staticmethod
     def load_text_file(file_path: str) -> str:
-        """Load text from file"""
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 return f.read()
@@ -135,7 +110,7 @@ class DocumentLoader:
     
     @staticmethod
     def load_json_file(file_path: str) -> List[Dict]:
-        """Load documents from JSON file"""
+
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -156,17 +131,6 @@ class DocumentLoader:
         file_pattern: str = "*.txt",
         recursive: bool = False
     ) -> List[Dict]:
-        """
-        Load all documents from directory
-        
-        Args:
-            directory: Directory path
-            file_pattern: File pattern to match
-            recursive: Whether to search recursively
-        
-        Returns:
-            List of document dictionaries
-        """
         dir_path = Path(directory)
         
         if not dir_path.exists():
@@ -195,14 +159,10 @@ class DocumentLoader:
 
 
 class TextPreprocessor:
-    """Preprocess text for better retrieval"""
     
     @staticmethod
     def clean_text(text: str) -> str:
-        """Clean and normalize text"""
-        # Remove extra whitespace
         text = re.sub(r'\s+', ' ', text)
-        
         # Remove special characters but keep punctuation
         text = re.sub(r'[^\w\s.,!?;:()\-\']', '', text)
         
@@ -214,7 +174,6 @@ class TextPreprocessor:
     
     @staticmethod
     def extract_metadata(text: str) -> Dict:
-        """Extract metadata from text"""
         metadata = {
             "length": len(text),
             "word_count": len(text.split()),
@@ -231,12 +190,6 @@ class TextPreprocessor:
     
     @staticmethod
     def split_by_sections(text: str) -> List[Tuple[str, str]]:
-        """
-        Split text by markdown sections
-        
-        Returns:
-            List of (section_title, section_content) tuples
-        """
         sections = []
         current_title = "Introduction"
         current_content = []
@@ -266,11 +219,6 @@ class TextPreprocessor:
 
 
 class DocumentProcessor:
-    """
-    Complete document processing pipeline
-    Combines loading, preprocessing, and chunking
-    """
-    
     def __init__(
         self,
         chunk_size: int = 512,
@@ -283,7 +231,6 @@ class DocumentProcessor:
         self.clean_text = clean_text
     
     def process_file(self, file_path: str) -> List[Dict]:
-        """Process a single file into chunks"""
         # Load file
         text = self.loader.load_text_file(file_path)
         
@@ -372,7 +319,6 @@ def load_default_knowledge_base() -> List[str]:
 
 
 def get_fallback_knowledge_base() -> List[str]:
-    """Get fallback knowledge base"""
     return [
         "Retrieval Augmented Generation (RAG) represents a sophisticated hybrid approach in the field of artificial intelligence, particularly within the realm of natural language processing (NLP).",
         "It innovatively combines the capabilities of neural network-based language models with retrieval systems to enhance the generation of text, making it more accurate, informative, and contextually relevant.",
