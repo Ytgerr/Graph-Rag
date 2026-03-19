@@ -176,7 +176,7 @@ class RAGExperiment:
                 logger.info(f"❌ {mode.upper()} - не доступен")
                 continue
             
-            logger.info(f"\n📊 {mode.upper()} RETRIEVAL:")
+            logger.info(f"\n{mode.upper()} RETRIEVAL:")
             logger.info(f"{'-'*80}")
             
             for i, query_result in enumerate(results[mode]["queries"], 1):
@@ -190,7 +190,7 @@ class RAGExperiment:
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
         
-        logger.info(f"\n✅ Результаты сохранены в: {output_path}")
+        logger.info(f"\n Результаты сохранены в: {output_path}")
 
 
 if __name__ == "__main__":

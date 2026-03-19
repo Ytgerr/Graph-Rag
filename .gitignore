@@ -4,3 +4,4 @@ myenv
 rag_system.egg-info
 __pycache__
 .venv
+graph_rag_system.egg-info
