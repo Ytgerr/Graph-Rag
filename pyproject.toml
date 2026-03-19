@@ -1,6 +1,7 @@
 [project]
-name = "rag-system"
-version = "0.1.0"
+name = "graph-rag-system"
+version = "2.0.0"
+description = "Advanced RAG system with Knowledge Graph integration"
 requires-python = ">=3.10"
 
 dependencies = [
@@ -16,6 +17,14 @@ dependencies = [
   "pandas",
   "nltk",
   "spacy",
+  "networkx>=3.0",
+  "matplotlib",
+  "rank-bm25",
+]
+
+[project.optional-dependencies]
+embeddings = [
+  "sentence-transformers",
 ]
 
 [project.scripts]
@@ -31,4 +40,4 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["app"]
+include = ["app*"]

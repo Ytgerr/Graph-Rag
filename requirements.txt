@@ -1,6 +1,7 @@
+# Core dependencies
 nltk
 openai
-dotenv
+python-dotenv
 scipy
 numpy
 pandas
@@ -11,3 +12,17 @@ gradio
 requests
 spacy
 matplotlib
+
+# Graph and network analysis
+networkx>=3.0
+
+# Optional: Better BM25 implementation
+rank-bm25
+
+# Optional: Local embeddings (fallback)
+sentence-transformers
+
+# NLP resources (will be downloaded automatically)
+# en_core_web_sm (spacy model)
+# wordnet (nltk corpus)
+# punkt (nltk tokenizer)

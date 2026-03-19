@@ -1,0 +1,22 @@
+Metadata-Version: 2.4
+Name: graph-rag-system
+Version: 2.0.0
+Summary: Advanced RAG system with Knowledge Graph integration
+Requires-Python: >=3.10
+Requires-Dist: fastapi
+Requires-Dist: uvicorn
+Requires-Dist: gradio
+Requires-Dist: requests
+Requires-Dist: python-dotenv
+Requires-Dist: openai
+Requires-Dist: scikit-learn
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: pandas
+Requires-Dist: nltk
+Requires-Dist: spacy
+Requires-Dist: networkx>=3.0
+Requires-Dist: matplotlib
+Requires-Dist: rank-bm25
+Provides-Extra: embeddings
+Requires-Dist: sentence-transformers; extra == "embeddings"

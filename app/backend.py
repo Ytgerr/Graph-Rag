@@ -2,176 +2,68 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict
 import os
 from dotenv import load_dotenv
 import logging
 from openai import OpenAI
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
-import spacy
-import nltk
-from nltk.corpus import wordnet
-from collections import Counter
 import sys
 import subprocess
+
+# Import Graph RAG components
+from app.graph_rag import GraphRAGRetriever
+from app.vector_store import VectorStore, OpenAIEmbedding, LocalEmbedding
+from app.document_processor import load_default_knowledge_base
+
+# Ensure required NLP resources
+import nltk
+import spacy
 
 try:
     nltk.data.find('corpora/wordnet')
 except LookupError:
-    nltk.download('wordnet')
+    nltk.download('wordnet', quiet=True)
 
-# Load spacy model
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    nltk.download('punkt', quiet=True)
+
 try:
     nlp = spacy.load("en_core_web_sm")
 except OSError:
     subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"], check=False)
+    nlp = spacy.load("en_core_web_sm")
 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 load_dotenv()
+
 
 class QueryRequest(BaseModel):
     query: str
     top_k: int = 5
     temperature: float = 0.2
     model: str = "openai/gpt-4o-mini"
-    similarity_type: str = "enhanced"  
+    retrieval_mode: str = "graph_rag"  # "graph_rag", "vector", "hybrid"
+    use_entity_context: bool = True
 
 
 class RAGResponse(BaseModel):
     answer: str
     sources: List[str]
     similarity_scores: List[float]
+    metadata: Optional[Dict] = None
 
 
-def get_synonyms(word):
-    """Get synonyms for a word using WordNet"""
-    synonyms = set()
-    for syn in wordnet.synsets(word):
-        for lemma in syn.lemmas():
-            synonyms.add(lemma.name())
-    return synonyms
+class SystemStats(BaseModel):
+    status: str
+    graph_stats: Optional[Dict] = None
+    vector_stats: Optional[Dict] = None
+    num_documents: int
 
-
-def preprocess_text(text):
-    """Preprocess text: lowercase, lemmatization, remove stopwords and punctuation"""
-    doc = nlp(text.lower())
-    lemmatized_words = []
-    for token in doc:
-        if token.is_stop or token.is_punct:
-            continue
-        lemmatized_words.append(token.lemma_)
-    return lemmatized_words
-
-
-def expand_with_synonyms(words):
-    """Expand words with their synonyms"""
-    expanded_words = words.copy()
-    for word in words:
-        expanded_words.extend(get_synonyms(word))
-    return expanded_words
-
-
-def calculate_enhanced_similarity(text1, text2):
-    """Calculate enhanced similarity using lemmatization and synonym expansion"""
-    words1 = preprocess_text(text1)
-    words2 = preprocess_text(text2)
-
-    # Expand with synonyms
-    words1_expanded = expand_with_synonyms(words1)
-    words2_expanded = expand_with_synonyms(words2)
-
-    # Count word frequencies
-    freq1 = Counter(words1_expanded)
-    freq2 = Counter(words2_expanded)
-
-    # Create a set of all unique words
-    unique_words = set(freq1.keys()).union(set(freq2.keys()))
-
-    # Create frequency vectors
-    vector1 = [freq1[word] for word in unique_words]
-    vector2 = [freq2[word] for word in unique_words]
-
-    # Convert lists to numpy arrays
-    vector1 = np.array(vector1)
-    vector2 = np.array(vector2)
-
-    # Calculate cosine similarity
-    norm1 = np.linalg.norm(vector1)
-    norm2 = np.linalg.norm(vector2)
-    
-    if norm1 == 0 or norm2 == 0:
-        return 0.0
-    
-    cosine_sim = np.dot(vector1, vector2) / (norm1 * norm2)
-    return float(cosine_sim)
-
-
-def calculate_cosine_similarity(text1, text2):
-    """Calculate standard TF-IDF cosine similarity"""
-    vectorizer = TfidfVectorizer(
-        stop_words='english',
-        use_idf=True,
-        norm='l2',
-        ngram_range=(1, 2),
-        sublinear_tf=True,
-        analyzer='word'
-    )
-    tfidf = vectorizer.fit_transform([text1, text2])
-    similarity = cosine_similarity(tfidf[0:1], tfidf[1:2])
-    return float(similarity[0][0])
-
-
-class RetrievalComponent:
-    """Vector-based document retrieval system using TF-IDF"""
-    
-    def __init__(self, method: str = 'vector'):
-        self.method = method
-        self.vectorizer = TfidfVectorizer(
-            stop_words='english',
-            use_idf=True,
-            norm='l2',
-            ngram_range=(1, 2),
-            sublinear_tf=True,
-            analyzer='word'
-        )
-        self.tfidf_matrix = None
-        self.documents = None
-    
-    def fit(self, records: List[str]) -> None:
-        """Fit the vectorizer on documents"""
-        self.documents = records
-        self.tfidf_matrix = self.vectorizer.fit_transform(records)
-        logger.info(f"Fitted retrieval component with {len(records)} documents")
-    
-    def retrieve_top_k(self, query: str, k: int = 5, similarity_type: str = "enhanced") -> tuple[List[str], List[float]]:
-        """Retrieve top-k most similar documents"""
-        if self.tfidf_matrix is None:
-            raise ValueError("Retrieval component not fitted. Call fit() first.")
-        
-        if similarity_type == "enhanced":
-            # Use enhanced similarity with lemmatization and synonyms
-            similarities = []
-            for doc in self.documents:
-                sim = calculate_enhanced_similarity(query, doc)
-                similarities.append(sim)
-            similarities = np.array(similarities)
-        else:
-            # Use standard TF-IDF cosine similarity
-            query_tfidf = self.vectorizer.transform([query])
-            similarities = cosine_similarity(query_tfidf, self.tfidf_matrix)[0]
-        
-        # Get top-k indices
-        top_indices = np.argsort(similarities)[-k:][::-1]
-        top_documents = [self.documents[idx] for idx in top_indices]
-        top_scores = [float(similarities[idx]) for idx in top_indices]
-        
-        return top_documents, top_scores
 
 class LLMComponent:
     """OpenAI/OpenRouter LLM interface"""
@@ -191,21 +83,31 @@ class LLMComponent:
         self,
         query: str,
         context: str,
+        entity_context: str = "",
         model: str = "openai/gpt-4o-mini",
         temperature: float = 0.2
     ) -> str:
         """Generate answer based on context"""
         system_prompt = (
-            "You are an expert Natural Language Processing assistant. "
-            "Provide detailed, accurate answers based on the given context. "
-            "If the context doesn't contain relevant information, say so."
+            "You are an expert AI assistant specializing in Retrieval Augmented Generation (RAG) "
+            "and Natural Language Processing. Provide detailed, accurate answers based on the given context. "
+            "If the context doesn't contain relevant information, say so clearly. "
+            "Use the entity relationships to provide more comprehensive answers."
         )
         
         user_prompt = f"""Based on the following context, answer the question:
 
-CONTEXT:
+DOCUMENT CONTEXT:
 {context}
-
+"""
+        
+        if entity_context:
+            user_prompt += f"""
+ENTITY RELATIONSHIPS:
+{entity_context}
+"""
+        
+        user_prompt += f"""
 QUESTION:
 {query}
 
@@ -219,22 +121,42 @@ ANSWER:"""
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=temperature,
-                max_tokens=1000
+                max_tokens=1500
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
             logger.error(f"LLM generation failed: {e}")
             raise
 
-class RAGSystem:
-    """Complete Retrieval Augmented Generation system"""
+
+class GraphRAGSystem:
+    """Complete Graph RAG system with multiple retrieval modes"""
     
-    def __init__(self, documents: List[str]):
-        self.retriever = RetrievalComponent()
-        self.retriever.fit(documents)
+    def __init__(self, documents: List[str], use_embeddings: bool = False):
+        self.documents = documents
         
+        # Initialize Graph RAG retriever
+        logger.info("Initializing Graph RAG retriever...")
+        self.graph_retriever = GraphRAGRetriever()
+        self.graph_retriever.build_graph(documents)
+        
+        # Initialize vector store (optional, for hybrid mode)
+        self.vector_store = None
+        if use_embeddings:
+            try:
+                logger.info("Initializing vector store with embeddings...")
+                embedding_model = OpenAIEmbedding()
+                self.vector_store = VectorStore(embedding_model=embedding_model)
+                self.vector_store.add_documents(documents)
+                logger.info("Vector store initialized successfully")
+            except Exception as e:
+                logger.warning(f"Failed to initialize embeddings: {e}. Using TF-IDF fallback.")
+                self.vector_store = None
+        
+        # Initialize LLM
         self.llm = LLMComponent()
-        logger.info("RAG system initialized")
+        
+        logger.info("Graph RAG system initialized successfully")
     
     def query(
         self,
@@ -242,19 +164,66 @@ class RAGSystem:
         top_k: int = 5,
         temperature: float = 0.2,
         model: str = "openai/gpt-4o-mini",
-        similarity_type: str = "enhanced"
+        retrieval_mode: str = "graph_rag",
+        use_entity_context: bool = True
     ) -> RAGResponse:
-        """Process a query through RAG pipeline"""
+        """Process a query through the RAG pipeline"""
         
         try:
-
-            sources, scores = self.retriever.retrieve_top_k(query, k=top_k, similarity_type=similarity_type)
+            # Retrieve relevant documents based on mode
+            if retrieval_mode == "graph_rag":
+                # Use Graph RAG hybrid retrieval
+                sources, scores, metadata = self.graph_retriever.hybrid_retrieve(
+                    query, 
+                    top_k=top_k,
+                    vector_weight=0.6,
+                    graph_weight=0.4
+                )
+            
+            elif retrieval_mode == "vector" and self.vector_store:
+                # Use pure vector retrieval
+                sources, scores, meta_list = self.vector_store.similarity_search(query, top_k)
+                metadata = {"method": "vector_only"}
+            
+            elif retrieval_mode == "hybrid" and self.vector_store:
+                # Combine Graph RAG with vector store
+                graph_sources, graph_scores, graph_meta = self.graph_retriever.hybrid_retrieve(
+                    query, top_k=top_k
+                )
+                vector_sources, vector_scores, _ = self.vector_store.similarity_search(query, top_k)
+                
+                # Merge results
+                combined = {}
+                for src, score in zip(graph_sources, graph_scores):
+                    combined[src] = score * 0.6
+                for src, score in zip(vector_sources, vector_scores):
+                    if src in combined:
+                        combined[src] += score * 0.4
+                    else:
+                        combined[src] = score * 0.4
+                
+                sorted_results = sorted(combined.items(), key=lambda x: x[1], reverse=True)[:top_k]
+                sources = [src for src, _ in sorted_results]
+                scores = [score for _, score in sorted_results]
+                metadata = {"method": "full_hybrid"}
+            
+            else:
+                # Fallback to graph RAG
+                sources, scores, metadata = self.graph_retriever.hybrid_retrieve(query, top_k=top_k)
+            
+            # Build context from sources
             context = "\n\n".join(sources)
             
-
+            # Get entity context if enabled
+            entity_context = ""
+            if use_entity_context:
+                entity_context = self.graph_retriever.get_entity_context(query, max_entities=10)
+            
+            # Generate answer using LLM
             answer = self.llm.generate(
                 query=query,
                 context=context,
+                entity_context=entity_context,
                 model=model,
                 temperature=temperature
             )
@@ -262,7 +231,8 @@ class RAGSystem:
             return RAGResponse(
                 answer=answer,
                 sources=sources,
-                similarity_scores=scores
+                similarity_scores=scores,
+                metadata=metadata
             )
         
         except Exception as e:
@@ -270,39 +240,12 @@ class RAGSystem:
             raise
 
 
-DEFAULT_KNOWLEDGE_BASE = [
-    "Retrieval Augmented Generation (RAG) represents a sophisticated hybrid approach in the field of artificial intelligence, particularly within the realm of natural language processing (NLP).",
-    "It innovatively combines the capabilities of neural network-based language models with retrieval systems to enhance the generation of text, making it more accurate, informative, and contextually relevant.",
-    "This methodology leverages the strengths of both generative and retrieval architectures to tackle complex tasks that require not only linguistic fluency but also factual correctness and depth of knowledge.",
-    "At the core of Retrieval Augmented Generation (RAG) is a generative model, typically a transformer-based neural network, similar to those used in models like GPT (Generative Pre-trained Transformer) or BERT (Bidirectional Encoder Representations from Transformers).",
-    "This component is responsible for producing coherent and contextually appropriate language outputs based on a mixture of input prompts and additional information fetched by the retrieval component.",
-    "Complementing the language model is the retrieval system, which is usually built on a database of documents or a corpus of texts.",
-    "This system uses techniques from information retrieval to find and fetch documents that are relevant to the input query or prompt.",
-    "The mechanism of relevance determination can range from simple keyword matching to more complex semantic search algorithms which interpret the meaning behind the query to find the best matches.",
-    "This component merges the outputs from the language model and the retrieval system.",
-    "It effectively synthesizes the raw data fetched by the retrieval system into the generative process of the language model.",
-    "The integrator ensures that the information from the retrieval system is seamlessly incorporated into the final text output, enhancing the model's ability to generate responses that are not only fluent and grammatically correct but also rich in factual details and context-specific nuances.",
-    "When a query or prompt is received, the system first processes it to understand the requirement or the context.",
-    "Based on the processed query, the retrieval system searches through its database to find relevant documents or information snippets.",
-    "This retrieval is guided by the similarity of content in the documents to the query, which can be determined through various techniques like vector embeddings or semantic similarity measures.",
-    "The retrieved documents are then fed into the language model.",
-    "In some implementations, this integration happens at the token level, where the model can access and incorporate specific pieces of information from the retrieved texts dynamically as it generates each part of the response.",
-    "The language model, now augmented with direct access to retrieved information, generates a response.",
-    "This response is not only influenced by the training of the model but also by the specific facts and details contained in the retrieved documents, making it more tailored and accurate.",
-    "By directly incorporating information from external sources, Retrieval Augmented Generation (RAG) models can produce responses that are more factual and relevant to the given query.",
-    "This is particularly useful in domains like medical advice, technical support, and other areas where precision and up-to-date knowledge are crucial.",
-    "Retrieval Augmented Generation (RAG) systems can dynamically adapt to new information since they retrieve data in real-time from their databases.",
-    "This allows them to remain current with the latest knowledge and trends without needing frequent retraining.",
-    "With access to a wide range of documents, Retrieval Augmented Generation (RAG) systems can provide detailed and nuanced answers that a standalone language model might not be capable of generating based solely on its pre-trained knowledge.",
-    "While Retrieval Augmented Generation (RAG) offers substantial benefits, it also comes with its challenges.",
-    "These include the complexity of integrating retrieval and generation systems, the computational overhead associated with real-time data retrieval, and the need for maintaining a large, up-to-date, and high-quality database of retrievable texts.",
-    "Furthermore, ensuring the relevance and accuracy of the retrieved information remains a significant challenge, as does managing the potential for introducing biases or errors from the external sources.",
-    "In summary, Retrieval Augmented Generation represents a significant advancement in the field of artificial intelligence, merging the best of retrieval-based and generative technologies to create systems that not only understand and generate natural language but also deeply comprehend and utilize the vast amounts of information available in textual form.",
-    "A RAG vector store is a database or dataset that contains vectorized data points."
-]
-
-
-app = FastAPI(title="RAG System API", version="1.0.0")
+# Initialize FastAPI app
+app = FastAPI(
+    title="Graph RAG System API",
+    version="2.0.0",
+    description="Advanced RAG system with knowledge graph integration"
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -312,16 +255,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Initialize RAG system
+rag_system = None
+
 try:
-    rag_system = RAGSystem(DEFAULT_KNOWLEDGE_BASE)
-    logger.info("RAG system ready")
+    logger.info("Loading knowledge base...")
+    documents = load_default_knowledge_base()
+    
+    logger.info(f"Initializing Graph RAG system with {len(documents)} documents...")
+    
+    # Try to use embeddings, fallback to TF-IDF if not available
+    use_embeddings = bool(os.getenv("OPENAI_API_KEY"))
+    rag_system = GraphRAGSystem(documents, use_embeddings=use_embeddings)
+    
+    logger.info("Graph RAG system ready!")
+    
 except Exception as e:
     logger.error(f"Failed to initialize RAG system: {e}")
     rag_system = None
 
+
 @app.post("/query", response_model=RAGResponse)
 async def query_rag(request: QueryRequest) -> RAGResponse:
-    """Query the RAG system"""
+    """Query the Graph RAG system"""
     if not rag_system:
         raise HTTPException(status_code=500, detail="RAG system not initialized")
     
@@ -334,7 +290,8 @@ async def query_rag(request: QueryRequest) -> RAGResponse:
             top_k=request.top_k,
             temperature=request.temperature,
             model=request.model,
-            similarity_type=request.similarity_type
+            retrieval_mode=request.retrieval_mode,
+            use_entity_context=request.use_entity_context
         )
         return response
     except Exception as e:
@@ -351,6 +308,79 @@ async def health_check():
     }
 
 
+@app.get("/stats", response_model=SystemStats)
+async def get_stats():
+    """Get system statistics"""
+    if not rag_system:
+        raise HTTPException(status_code=500, detail="RAG system not initialized")
+    
+    stats = SystemStats(
+        status="ready",
+        graph_stats=rag_system.graph_retriever.knowledge_graph.get_graph_stats(),
+        vector_stats=rag_system.vector_store.get_stats() if rag_system.vector_store else None,
+        num_documents=len(rag_system.documents)
+    )
+    
+    return stats
+
+
+@app.get("/graph/entities")
+async def get_entities(limit: int = 50):
+    """Get top entities from knowledge graph"""
+    if not rag_system:
+        raise HTTPException(status_code=500, detail="RAG system not initialized")
+    
+    entities = rag_system.graph_retriever.knowledge_graph.entities
+    
+    # Sort by frequency
+    sorted_entities = sorted(
+        entities.values(),
+        key=lambda e: e.frequency,
+        reverse=True
+    )[:limit]
+    
+    return {
+        "entities": [
+            {
+                "text": e.text,
+                "type": e.entity_type,
+                "frequency": e.frequency,
+                "num_documents": len(e.doc_ids)
+            }
+            for e in sorted_entities
+        ]
+    }
+
+
+@app.get("/graph/relations")
+async def get_relations(limit: int = 50):
+    """Get top relations from knowledge graph"""
+    if not rag_system:
+        raise HTTPException(status_code=500, detail="RAG system not initialized")
+    
+    relations = rag_system.graph_retriever.knowledge_graph.relations
+    
+    # Sort by weight
+    sorted_relations = sorted(
+        relations,
+        key=lambda r: r.weight,
+        reverse=True
+    )[:limit]
+    
+    return {
+        "relations": [
+            {
+                "source": r.source.text,
+                "target": r.target.text,
+                "type": r.relation_type,
+                "weight": r.weight,
+                "num_documents": len(r.doc_ids)
+            }
+            for r in sorted_relations
+        ]
+    }
+
+
 def main():
     uvicorn.run(
         "app.backend:app",
@@ -359,3 +389,7 @@ def main():
         log_level="info",
         reload=True,
     )
+
+
+if __name__ == "__main__":
+    main()
