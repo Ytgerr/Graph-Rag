@@ -1,0 +1,3 @@
+[console_scripts]
+backend = app.backend:main
+frontend = app.frontend:main
