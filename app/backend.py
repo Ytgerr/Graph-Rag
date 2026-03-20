@@ -11,7 +11,7 @@ import sys
 import subprocess
 
 from app.graph_rag import GraphRAGRetriever
-from app.vector_store import VectorStore, OpenAIEmbedding
+from app.vector_store import VectorRAGRetriever
 from app.document_processor import load_default_knowledge_base
 
 import nltk
@@ -45,8 +45,9 @@ class QueryRequest(BaseModel):
     top_k: int = 5
     temperature: float = 0.2
     model: str = "openai/gpt-4o-mini"
-    retrieval_mode: str = "graph_rag" 
-    use_entity_context: bool = True
+    retrieval_mode: str = "graph"  # "graph" or "vector"
+    vector_method: str = "tfidf"  # "tfidf" or "bm25" (only used when retrieval_mode="vector")
+    use_entity_context: bool = True  # Only used for graph mode
 
 
 class RAGResponse(BaseModel):
@@ -126,9 +127,17 @@ ANSWER:"""
             raise
 
 
-class GraphRAGSystem:
+class RAGSystem:
+    """Unified RAG system supporting Graph and Vector retrieval modes"""
     
-    def __init__(self, documents: List[str], use_embeddings: bool = False):
+    def __init__(self, documents: List[str], vector_method: str = "tfidf"):
+        """
+        Initialize RAG system with both retrievers
+        
+        Args:
+            documents: List of documents to index
+            vector_method: "tfidf" or "bm25" for vector retrieval
+        """
         self.documents = documents
         
         # Initialize Graph RAG retriever
@@ -136,23 +145,15 @@ class GraphRAGSystem:
         self.graph_retriever = GraphRAGRetriever()
         self.graph_retriever.build_graph(documents)
         
-        # Initialize vector store (optional, for hybrid mode)
-        self.vector_store = None
-        if use_embeddings:
-            try:
-                logger.info("Initializing vector store with embeddings...")
-                embedding_model = OpenAIEmbedding()
-                self.vector_store = VectorStore(embedding_model=embedding_model)
-                self.vector_store.add_documents(documents)
-                logger.info("Vector store initialized successfully")
-            except Exception as e:
-                logger.warning(f"Failed to initialize embeddings: {e}")
-                logger.warning("Continuing without vector store - only graph-based retrieval will be available")
-                self.vector_store = None
+        # Initialize Vector RAG retriever
+        logger.info(f"Initializing Vector RAG retriever with {vector_method}...")
+        self.vector_retriever = VectorRAGRetriever(method=vector_method)
+        self.vector_retriever.build_index(documents)
         
+        # Initialize LLM
         self.llm = LLMComponent()
         
-        logger.info("Graph RAG system initialized successfully")
+        logger.info("RAG system initialized successfully")
     
     def query(
         self,
@@ -160,55 +161,57 @@ class GraphRAGSystem:
         top_k: int = 5,
         temperature: float = 0.2,
         model: str = "openai/gpt-4o-mini",
-        retrieval_mode: str = "graph_rag",
+        retrieval_mode: str = "graph",
+        vector_method: str = "tfidf",
         use_entity_context: bool = True
     ) -> RAGResponse:
-        """Process a query through the RAG pipeline"""
+        """
+        Process a query through the RAG pipeline
         
+        Args:
+            query: User query
+            top_k: Number of documents to retrieve
+            temperature: LLM temperature
+            model: LLM model to use
+            retrieval_mode: "graph" or "vector"
+            vector_method: "tfidf" or "bm25" (only used if retrieval_mode="vector")
+            use_entity_context: Whether to add entity context (only for graph mode)
+        """
         try:
             # Retrieve relevant documents based on mode
-            if retrieval_mode == "graph_rag":
-                # Use Graph RAG hybrid retrieval
-                sources, scores, metadata = self.graph_retriever.hybrid_retrieve(
-                    query, 
-                    top_k=top_k,
-                    vector_weight=0.6,
-                    graph_weight=0.4
-                )
-            
-            elif retrieval_mode == "vector" and self.vector_store:
-                # Use pure vector retrieval
-                sources, scores, meta_list = self.vector_store.similarity_search(query, top_k)
-                metadata = {"method": "vector_only"}
-            
-            elif retrieval_mode == "hybrid" and self.vector_store:
-                graph_sources, graph_scores, graph_meta = self.graph_retriever.hybrid_retrieve(
-                    query, top_k=top_k
-                )
-                vector_sources, vector_scores, _ = self.vector_store.similarity_search(query, top_k)
+            if retrieval_mode == "graph":
+                sources, scores, metadata = self.graph_retriever.retrieve(query, top_k=top_k)
                 
-                combined = {}
-                for src, score in zip(graph_sources, graph_scores):
-                    combined[src] = score * 0.6
-                for src, score in zip(vector_sources, vector_scores):
-                    if src in combined:
-                        combined[src] += score * 0.4
-                    else:
-                        combined[src] = score * 0.4
+                # Add entity context for graph mode
+                entity_context = ""
+                if use_entity_context and sources:
+                    entity_context = self.graph_retriever.get_entity_context(query, max_entities=10)
+            
+            elif retrieval_mode == "vector":
+                # Check if we need to rebuild index with different method
+                if self.vector_retriever.method != vector_method:
+                    logger.info(f"Switching vector method from {self.vector_retriever.method} to {vector_method}")
+                    self.vector_retriever = VectorRAGRetriever(method=vector_method)
+                    self.vector_retriever.build_index(self.documents)
                 
-                sorted_results = sorted(combined.items(), key=lambda x: x[1], reverse=True)[:top_k]
-                sources = [src for src, _ in sorted_results]
-                scores = [score for _, score in sorted_results]
-                metadata = {"method": "full_hybrid"}
+                sources, scores, metadata = self.vector_retriever.retrieve(query, top_k=top_k)
+                entity_context = ""  # No entity context for vector mode
             
             else:
-                sources, scores, metadata = self.graph_retriever.hybrid_retrieve(query, top_k=top_k)
-
-            context = "\n\n".join(sources)
+                raise ValueError(f"Invalid retrieval_mode: {retrieval_mode}. Must be 'graph' or 'vector'")
             
-            entity_context = ""
-            if use_entity_context:
-                entity_context = self.graph_retriever.get_entity_context(query, max_entities=10)
+            # Handle empty results
+            if not sources:
+                logger.warning(f"No sources retrieved for query: {query}")
+                return RAGResponse(
+                    answer="I couldn't find relevant information to answer your question.",
+                    sources=[],
+                    similarity_scores=[],
+                    metadata=metadata
+                )
+            
+            # Prepare context
+            context = "\n\n".join(sources)
             
             # Generate answer using LLM
             answer = self.llm.generate(
@@ -232,9 +235,9 @@ class GraphRAGSystem:
 
 
 app = FastAPI(
-    title="Graph RAG System API",
+    title="RAG System API",
     version="2.0.0",
-    description="Advanced RAG system with knowledge graph integration"
+    description="RAG system with Graph and Vector retrieval modes"
 )
 
 app.add_middleware(
@@ -251,20 +254,19 @@ try:
     logger.info("Loading knowledge base...")
     documents = load_default_knowledge_base()
     
-    logger.info(f"Initializing Graph RAG system with {len(documents)} documents...")
+    logger.info(f"Initializing RAG system with {len(documents)} documents...")
     
-    # Embeddings используют официальный OpenAI API (NOT OpenRouter)
-    # OpenRouter не поддерживает embeddings endpoint, только LLM calls
-    # Для включения embeddings: ENABLE_EMBEDDINGS=true
-    use_embeddings = os.getenv("ENABLE_EMBEDDINGS", "false").lower() == "true"
-    if use_embeddings:
-        logger.info("Embeddings explicitly enabled - will use official OpenAI API for embeddings")
-    else:
-        logger.info("Using graph-based retrieval only (embeddings disabled by default)")
+    # Get vector method from environment (default: tfidf)
+    vector_method = os.getenv("VECTOR_METHOD", "tfidf").lower()
+    if vector_method not in ["tfidf", "bm25"]:
+        logger.warning(f"Invalid VECTOR_METHOD '{vector_method}', using 'tfidf'")
+        vector_method = "tfidf"
     
-    rag_system = GraphRAGSystem(documents, use_embeddings=use_embeddings)
+    rag_system = RAGSystem(documents, vector_method=vector_method)
     
-    logger.info("Graph RAG system ready!")
+    logger.info("RAG system ready!")
+    logger.info(f"  - Graph retrieval: enabled")
+    logger.info(f"  - Vector retrieval: enabled ({vector_method.upper()})")
     
 except Exception as e:
     logger.error(f"Failed to initialize RAG system: {e}")
@@ -273,12 +275,32 @@ except Exception as e:
 
 @app.post("/query", response_model=RAGResponse)
 async def query_rag(request: QueryRequest) -> RAGResponse:
-    """Query the Graph RAG system"""
+    """
+    Query the RAG system
+    
+    Supports two retrieval modes:
+    - "graph": Knowledge graph-based retrieval with entity extraction
+    - "vector": Vector-based retrieval (TF-IDF or BM25)
+    """
     if not rag_system:
         raise HTTPException(status_code=500, detail="RAG system not initialized")
     
     if not request.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
+    
+    # Validate retrieval mode
+    if request.retrieval_mode not in ["graph", "vector"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid retrieval_mode '{request.retrieval_mode}'. Must be 'graph' or 'vector'"
+        )
+    
+    # Validate vector method
+    if request.retrieval_mode == "vector" and request.vector_method not in ["tfidf", "bm25"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid vector_method '{request.vector_method}'. Must be 'tfidf' or 'bm25'"
+        )
     
     try:
         response = rag_system.query(
@@ -287,6 +309,7 @@ async def query_rag(request: QueryRequest) -> RAGResponse:
             temperature=request.temperature,
             model=request.model,
             retrieval_mode=request.retrieval_mode,
+            vector_method=request.vector_method,
             use_entity_context=request.use_entity_context
         )
         return response
@@ -313,7 +336,7 @@ async def get_stats():
     stats = SystemStats(
         status="ready",
         graph_stats=rag_system.graph_retriever.knowledge_graph.get_graph_stats(),
-        vector_stats=rag_system.vector_store.get_stats() if rag_system.vector_store else None,
+        vector_stats=rag_system.vector_retriever.get_stats(),
         num_documents=len(rag_system.documents)
     )
     

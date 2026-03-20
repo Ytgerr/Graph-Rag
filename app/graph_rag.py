@@ -152,8 +152,21 @@ class GraphExtractor:
         self.nlp = nlp_model or spacy.load("en_core_web_sm")
         
         self.entity_types = {
-            'PERSON', 'ORG', 'GPE', 'PRODUCT', 'EVENT', 
+            'PERSON', 'ORG', 'GPE', 'PRODUCT', 'EVENT',
             'WORK_OF_ART', 'LAW', 'LANGUAGE', 'NORP'
+        }
+        
+        # Technical terms that should be treated as entities
+        self.technical_terms = {
+            'transformer', 'transformers', 'attention mechanism', 'attention',
+            'neural network', 'neural networks', 'deep learning',
+            'machine learning', 'gpt', 'gpt-3', 'gpt-4', 'bert',
+            'rag', 'retrieval augmented generation', 'llm', 'large language model',
+            'embedding', 'embeddings', 'vector', 'vectors',
+            'knowledge graph', 'knowledge graphs', 'entity', 'entities',
+            'nlp', 'natural language processing', 'ai', 'artificial intelligence',
+            'encoder', 'decoder', 'self-attention', 'multi-head attention',
+            'feedforward', 'layer normalization', 'positional encoding'
         }
   
         self.relation_patterns = [
@@ -164,20 +177,32 @@ class GraphExtractor:
         ]
     
     def extract_entities(self, text: str, doc_id: int) -> List[Entity]:
-        """Extract named entities from text"""
+        """Extract named entities from text including technical terms"""
         doc = self.nlp(text)
         entities = []
+        text_lower = text.lower()
 
+        # Extract named entities
         for ent in doc.ents:
             if ent.label_ in self.entity_types:
                 entity = Entity(ent.text, ent.label_, doc_id)
                 entities.append(entity)
         
+        # Extract technical terms (case-insensitive matching)
+        for term in self.technical_terms:
+            if term in text_lower:
+                entity = Entity(term, 'TECHNICAL_TERM', doc_id)
+                entities.append(entity)
+        
+        # Extract noun chunks as concepts
         for chunk in doc.noun_chunks:
+            chunk_text = chunk.text.lower()
             # Filter out very short or very long chunks
             if 2 <= len(chunk.text.split()) <= 5:
-                entity = Entity(chunk.text, 'CONCEPT', doc_id)
-                entities.append(entity)
+                # Skip if already captured as technical term
+                if chunk_text not in self.technical_terms:
+                    entity = Entity(chunk.text, 'CONCEPT', doc_id)
+                    entities.append(entity)
         
         return entities
     
@@ -226,21 +251,23 @@ class GraphExtractor:
 
 
 class GraphRAGRetriever:
+    """Pure graph-based retrieval using knowledge graph structure with TF-IDF fallback"""
     
     def __init__(self):
         self.knowledge_graph = KnowledgeGraph()
         self.graph_extractor = GraphExtractor()
         self.documents: List[str] = []
+        
+        # Add TF-IDF fallback for better recall
         self.vectorizer = TfidfVectorizer(
             stop_words='english',
             use_idf=True,
             norm='l2',
-            ngram_range=(1, 3),
-            max_features=5000,
+            ngram_range=(1, 2),
+            max_features=3000,
             sublinear_tf=True
         )
         self.tfidf_matrix = None
-        self.entity_embeddings = None
     
     def build_graph(self, documents: List[str]):
         """Build knowledge graph from documents"""
@@ -256,121 +283,106 @@ class GraphRAGRetriever:
                 added_entity = self.knowledge_graph.add_entity(entity, doc_id)
                 added_entities.append(added_entity)
             
+            # Extract relations
             relations = self.graph_extractor.extract_relations(doc_text, doc_id, added_entities)
             for relation in relations:
                 self.knowledge_graph.add_relation(relation, doc_id)
         
+        # Build TF-IDF index for fallback
         self.tfidf_matrix = self.vectorizer.fit_transform(documents)
         
         stats = self.knowledge_graph.get_graph_stats()
         logger.info(f"Knowledge graph built: {stats}")
     
-    def _vector_retrieve(self, query: str, top_k: int) -> Tuple[List[int], List[float]]:
-        """Retrieve documents using vector similarity"""
-        query_tfidf = self.vectorizer.transform([query])
-        similarities = cosine_similarity(query_tfidf, self.tfidf_matrix)[0]
-        
-        top_indices = np.argsort(similarities)[-top_k:][::-1]
-        top_scores = similarities[top_indices]
-        
-        return top_indices.tolist(), top_scores.tolist()
-    
-    def _graph_retrieve(self, query: str, top_k: int) -> Tuple[List[int], List[float]]:
-        """Retrieve documents using graph traversal"""
+    def retrieve(self, query: str, top_k: int = 5) -> Tuple[List[str], List[float], Dict]:
+        """Retrieve documents using graph-based approach with TF-IDF fallback"""
         # Extract entities from query
         query_entities = self.graph_extractor.extract_entities(query, -1)
         
-        if not query_entities:
-            return [], []
-        
-        # Find matching entities in graph
-        matched_entities = []
-        for q_entity in query_entities:
-            if q_entity.text in self.knowledge_graph.entities:
-                matched_entities.append(q_entity.text)
-        
-        if not matched_entities:
-            return [], []
-        
-        # Get documents containing these entities and their neighbors
-        doc_scores = defaultdict(float)
-        
-        for entity_text in matched_entities:
-            # Direct match - high score
-            direct_docs = self.knowledge_graph.get_documents_for_entity(entity_text)
-            for doc_id in direct_docs:
-                doc_scores[doc_id] += 1.0
+        # Try graph-based retrieval first
+        if query_entities:
+            # Find matching entities in graph
+            matched_entities = []
+            for q_entity in query_entities:
+                if q_entity.text in self.knowledge_graph.entities:
+                    matched_entities.append(q_entity.text)
             
-            # Neighbor entities - medium score
-            neighbors = self.knowledge_graph.get_entity_neighbors(entity_text, max_depth=1)
-            for neighbor in neighbors:
-                neighbor_docs = self.knowledge_graph.get_documents_for_entity(neighbor)
-                for doc_id in neighbor_docs:
-                    doc_scores[doc_id] += 0.5
+            if matched_entities:
+                # Get documents containing these entities and their neighbors
+                doc_scores = defaultdict(float)
+                
+                for entity_text in matched_entities:
+                    # Direct match - high score
+                    direct_docs = self.knowledge_graph.get_documents_for_entity(entity_text)
+                    for doc_id in direct_docs:
+                        doc_scores[doc_id] += 1.0
+                    
+                    # Neighbor entities - medium score (1-hop traversal)
+                    neighbors = self.knowledge_graph.get_entity_neighbors(entity_text, max_depth=1)
+                    for neighbor in neighbors:
+                        neighbor_docs = self.knowledge_graph.get_documents_for_entity(neighbor)
+                        for doc_id in neighbor_docs:
+                            doc_scores[doc_id] += 0.5
+                
+                # Sort by score
+                sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+                
+                if sorted_docs:
+                    doc_ids = [doc_id for doc_id, _ in sorted_docs]
+                    scores = [score for _, score in sorted_docs]
+                    
+                    # Normalize scores
+                    max_score = max(scores) if scores else 1.0
+                    scores = [s / max_score for s in scores]
+                    
+                    # Prepare metadata
+                    metadata = {
+                        "method": "graph",
+                        "query_entities": len(query_entities),
+                        "matched_entities": len(matched_entities),
+                        "graph_stats": self.knowledge_graph.get_graph_stats()
+                    }
+                    
+                    return (
+                        [self.documents[i] for i in doc_ids],
+                        scores,
+                        metadata
+                    )
         
-        # Sort by score
-        sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+        # Fallback to TF-IDF if no entities found or no matches
+        logger.info("Using TF-IDF fallback (no entities matched)")
         
-        if not sorted_docs:
-            return [], []
+        if self.tfidf_matrix is None:
+            logger.warning("TF-IDF matrix not built")
+            return [], [], {"method": "graph_fallback", "query_entities": len(query_entities), "matched_entities": 0}
         
-        doc_ids = [doc_id for doc_id, _ in sorted_docs]
-        scores = [score for _, score in sorted_docs]
+        # TF-IDF retrieval
+        query_vector = self.vectorizer.transform([query])
+        similarities = cosine_similarity(query_vector, self.tfidf_matrix)[0]
         
-        # Normalize scores
-        max_score = max(scores) if scores else 1.0
-        scores = [s / max_score for s in scores]
+        # Get top-k
+        top_indices = np.argsort(similarities)[-top_k:][::-1]
+        top_scores = similarities[top_indices]
         
-        return doc_ids, scores
-    
-    def hybrid_retrieve(
-        self, 
-        query: str, 
-        top_k: int = 5,
-        vector_weight: float = 0.6,
-        graph_weight: float = 0.4
-    ) -> Tuple[List[str], List[float], Dict]:
-
-        total_weight = vector_weight + graph_weight
-        vector_weight /= total_weight
-        graph_weight /= total_weight
+        # Filter out zero scores
+        valid_results = [(idx, score) for idx, score in zip(top_indices, top_scores) if score > 0]
         
-        vector_doc_ids, vector_scores = self._vector_retrieve(query, top_k * 2)
+        if not valid_results:
+            return [], [], {"method": "graph_fallback", "query_entities": len(query_entities), "matched_entities": 0}
         
-        graph_doc_ids, graph_scores = self._graph_retrieve(query, top_k * 2)
+        doc_ids = [idx for idx, _ in valid_results]
+        scores = [score for _, score in valid_results]
         
-        combined_scores = defaultdict(float)
-        
-        for doc_id, score in zip(vector_doc_ids, vector_scores):
-            combined_scores[doc_id] += vector_weight * score
-        
-        for doc_id, score in zip(graph_doc_ids, graph_scores):
-            combined_scores[doc_id] += graph_weight * score
-        
-        sorted_results = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
-        
-        if not sorted_results:
-            return (
-                [self.documents[i] for i in vector_doc_ids[:top_k]],
-                vector_scores[:top_k],
-                {"method": "vector_only", "graph_entities": 0}
-            )
-        
-        final_doc_ids = [doc_id for doc_id, _ in sorted_results]
-        final_scores = [score for _, score in sorted_results]
-        
-        query_entities = self.graph_extractor.extract_entities(query, -1)
         metadata = {
-            "method": "hybrid",
-            "vector_weight": vector_weight,
-            "graph_weight": graph_weight,
+            "method": "graph_fallback",
             "query_entities": len(query_entities),
-            "graph_stats": self.knowledge_graph.get_graph_stats()
+            "matched_entities": 0,
+            "fallback_reason": "no_entity_matches"
         }
         
         return (
-            [self.documents[i] for i in final_doc_ids],
-            final_scores,
+            [self.documents[i] for i in doc_ids],
+            scores,
             metadata
         )
     

@@ -1,0 +1,108 @@
+{
+  "metadata": {
+    "timestamp": "2026-03-20T13:04:15.424909",
+    "vector_method": "tfidf",
+    "num_queries": 6,
+    "num_assessments": 6
+  },
+  "test_queries": [
+    {
+      "query": "What is retrieval augmented generation?",
+      "type": "entity-centric",
+      "expected_strength": "graph",
+      "description": "Tests entity recognition for RAG concept"
+    },
+    {
+      "query": "How does RAG reduce AI hallucinations?",
+      "type": "relational",
+      "expected_strength": "graph",
+      "description": "Tests relationship between RAG and hallucination reduction"
+    },
+    {
+      "query": "Explain the benefits of using external data sources in LLMs",
+      "type": "semantic",
+      "expected_strength": "vector",
+      "description": "Tests semantic understanding without specific entities"
+    },
+    {
+      "query": "What is OpenAI and what products does it develop?",
+      "type": "entity-centric",
+      "expected_strength": "graph",
+      "description": "Tests entity extraction and related information retrieval"
+    },
+    {
+      "query": "Describe information retrieval techniques in AI systems",
+      "type": "keyword",
+      "expected_strength": "vector",
+      "description": "Tests keyword-based retrieval for general concepts"
+    },
+    {
+      "query": "How do knowledge graphs improve search and retrieval?",
+      "type": "relational",
+      "expected_strength": "graph",
+      "description": "Tests understanding of knowledge graph benefits"
+    }
+  ],
+  "assessments": [
+    {
+      "query": "What is retrieval augmented generation?",
+      "query_type": "entity-centric",
+      "expected_strength": "graph",
+      "timestamp": "2026-03-20T12:59:32.062887",
+      "ratings": {
+        "graph": 5,
+        "vector": 4
+      }
+    },
+    {
+      "query": "How does RAG reduce AI hallucinations?",
+      "query_type": "relational",
+      "expected_strength": "graph",
+      "timestamp": "2026-03-20T13:00:15.194069",
+      "ratings": {
+        "graph": 3,
+        "vector": 5
+      }
+    },
+    {
+      "query": "Explain the benefits of using external data sources in LLMs",
+      "query_type": "semantic",
+      "expected_strength": "vector",
+      "timestamp": "2026-03-20T13:02:06.306243",
+      "ratings": {
+        "graph": 2,
+        "vector": 5
+      }
+    },
+    {
+      "query": "What is OpenAI and what products does it develop?",
+      "query_type": "entity-centric",
+      "expected_strength": "graph",
+      "timestamp": "2026-03-20T13:02:46.853322",
+      "ratings": {
+        "graph": 5,
+        "vector": 3
+      }
+    },
+    {
+      "query": "Describe information retrieval techniques in AI systems",
+      "query_type": "keyword",
+      "expected_strength": "vector",
+      "timestamp": "2026-03-20T13:03:25.407294",
+      "ratings": {
+        "graph": 2,
+        "vector": 5
+      }
+    },
+    {
+      "query": "How do knowledge graphs improve search and retrieval?",
+      "query_type": "relational",
+      "expected_strength": "graph",
+      "timestamp": "2026-03-20T13:03:51.851591",
+      "ratings": {
+        "graph": 3,
+        "vector": 4
+      }
+    }
+  ]
+}

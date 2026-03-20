@@ -226,29 +226,58 @@ class VectorStore:
         }
 
 
-class HybridVectorStore:
+class VectorRAGRetriever:
     """
-    Hybrid vector store combining dense and sparse representations
-    Implements BM25 + Dense embeddings for better retrieval
+    Pure vector-based retrieval supporting TF-IDF and BM25 methods
     """
     
-    def __init__(self, embedding_model: Optional[EmbeddingModel] = None):
-        self.dense_store = VectorStore(embedding_model=embedding_model)
+    def __init__(self, method: str = "tfidf"):
+        """
+        Initialize vector retriever
+        
+        Args:
+            method: "tfidf" or "bm25"
+        """
+        self.method = method.lower()
         self.documents: List[str] = []
+        self.tfidf_vectorizer = None
+        self.tfidf_matrix = None
         self.bm25_index = None
+        
+        if self.method not in ["tfidf", "bm25"]:
+            raise ValueError(f"Method must be 'tfidf' or 'bm25', got '{method}'")
+        
+        logger.info(f"Initialized VectorRAGRetriever with method: {self.method}")
     
-    def add_documents(self, documents: List[str], metadata: Optional[List[Dict]] = None):
-        """Add documents to both dense and sparse indices"""
+    def build_index(self, documents: List[str]):
+        """Build index from documents"""
+        logger.info(f"Building {self.method.upper()} index from {len(documents)} documents...")
         self.documents = documents
         
-        # Add to dense store
-        self.dense_store.add_documents(documents, metadata)
+        if self.method == "tfidf":
+            self._build_tfidf_index(documents)
+        elif self.method == "bm25":
+            self._build_bm25_index(documents)
         
-        # Build BM25 index
-        self._build_bm25_index(documents)
+        logger.info(f"{self.method.upper()} index built successfully")
+    
+    def _build_tfidf_index(self, documents: List[str]):
+        """Build TF-IDF index"""
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        
+        self.tfidf_vectorizer = TfidfVectorizer(
+            stop_words='english',
+            use_idf=True,
+            norm='l2',
+            ngram_range=(1, 3),
+            max_features=5000,
+            sublinear_tf=True
+        )
+        self.tfidf_matrix = self.tfidf_vectorizer.fit_transform(documents)
+        logger.info(f"TF-IDF matrix shape: {self.tfidf_matrix.shape}")
     
     def _build_bm25_index(self, documents: List[str]):
-        """Build BM25 index for sparse retrieval"""
+        """Build BM25 index"""
         try:
             from rank_bm25 import BM25Okapi
             import nltk
@@ -263,68 +292,101 @@ class HybridVectorStore:
             # Tokenize documents
             tokenized_docs = [word_tokenize(doc.lower()) for doc in documents]
             self.bm25_index = BM25Okapi(tokenized_docs)
-            logger.info("BM25 index built successfully")
+            logger.info(f"BM25 index built with {len(documents)} documents")
         
-        except ImportError:
-            logger.warning("rank-bm25 not installed, sparse retrieval disabled")
-            self.bm25_index = None
+        except ImportError as e:
+            logger.error("rank-bm25 not installed. Install with: pip install rank-bm25")
+            raise ImportError("rank-bm25 is required for BM25 retrieval") from e
     
-    def hybrid_search(
-        self, 
-        query: str, 
-        top_k: int = 5,
-        dense_weight: float = 0.7,
-        sparse_weight: float = 0.3
-    ) -> Tuple[List[str], List[float], List[Dict]]:
+    def retrieve(self, query: str, top_k: int = 5) -> Tuple[List[str], List[float], Dict]:
         """
-        Hybrid search combining dense and sparse retrieval
+        Retrieve documents using the configured method
         
         Args:
             query: Search query
-            top_k: Number of results
-            dense_weight: Weight for dense embeddings (0-1)
-            sparse_weight: Weight for BM25 scores (0-1)
+            top_k: Number of results to return
+        
+        Returns:
+            Tuple of (documents, scores, metadata)
         """
-        # Normalize weights
-        total = dense_weight + sparse_weight
-        dense_weight /= total
-        sparse_weight /= total
+        if not self.documents:
+            logger.warning("No documents indexed")
+            return [], [], {"method": self.method, "num_documents": 0}
         
-        # Dense retrieval
-        dense_docs, dense_scores, metadata = self.dense_store.similarity_search(query, top_k * 2)
+        if self.method == "tfidf":
+            return self._retrieve_tfidf(query, top_k)
+        elif self.method == "bm25":
+            return self._retrieve_bm25(query, top_k)
+    
+    def _retrieve_tfidf(self, query: str, top_k: int) -> Tuple[List[str], List[float], Dict]:
+        """Retrieve using TF-IDF"""
+        if self.tfidf_vectorizer is None or self.tfidf_matrix is None:
+            raise ValueError("TF-IDF index not built. Call build_index() first.")
         
-        # Sparse retrieval (BM25)
-        if self.bm25_index:
-            from nltk.tokenize import word_tokenize
-            tokenized_query = word_tokenize(query.lower())
-            bm25_scores = self.bm25_index.get_scores(tokenized_query)
-            
-            # Normalize BM25 scores
-            max_bm25 = max(bm25_scores) if max(bm25_scores) > 0 else 1.0
-            bm25_scores = bm25_scores / max_bm25
-        else:
-            bm25_scores = np.zeros(len(self.documents))
+        # Transform query
+        query_vector = self.tfidf_vectorizer.transform([query])
         
-        # Combine scores
-        combined_scores = {}
+        # Calculate cosine similarity
+        similarities = cosine_similarity(query_vector, self.tfidf_matrix)[0]
         
-        # Add dense scores
-        for doc, score in zip(dense_docs, dense_scores):
-            doc_idx = self.documents.index(doc)
-            combined_scores[doc_idx] = dense_weight * score
+        # Get top-k indices
+        top_indices = np.argsort(similarities)[-top_k:][::-1]
+        top_scores = similarities[top_indices]
         
-        # Add sparse scores
-        for idx, score in enumerate(bm25_scores):
-            if idx in combined_scores:
-                combined_scores[idx] += sparse_weight * score
-            else:
-                combined_scores[idx] = sparse_weight * score
+        # Get documents
+        result_docs = [self.documents[i] for i in top_indices]
+        result_scores = top_scores.tolist()
         
-        # Sort and get top-k
-        sorted_indices = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+        metadata = {
+            "method": "tfidf",
+            "num_documents": len(self.documents),
+            "vocab_size": len(self.tfidf_vectorizer.vocabulary_)
+        }
         
-        result_docs = [self.documents[idx] for idx, _ in sorted_indices]
-        result_scores = [score for _, score in sorted_indices]
-        result_metadata = [self.dense_store.metadata[idx] for idx, _ in sorted_indices]
+        return result_docs, result_scores, metadata
+    
+    def _retrieve_bm25(self, query: str, top_k: int) -> Tuple[List[str], List[float], Dict]:
+        """Retrieve using BM25"""
+        if self.bm25_index is None:
+            raise ValueError("BM25 index not built. Call build_index() first.")
         
-        return result_docs, result_scores, result_metadata
+        from nltk.tokenize import word_tokenize
+        
+        # Tokenize query
+        tokenized_query = word_tokenize(query.lower())
+        
+        # Get BM25 scores
+        scores = self.bm25_index.get_scores(tokenized_query)
+        
+        # Get top-k indices
+        top_indices = np.argsort(scores)[-top_k:][::-1]
+        top_scores = scores[top_indices]
+        
+        # Normalize scores to [0, 1]
+        if top_scores.max() > 0:
+            top_scores = top_scores / top_scores.max()
+        
+        # Get documents
+        result_docs = [self.documents[i] for i in top_indices]
+        result_scores = top_scores.tolist()
+        
+        metadata = {
+            "method": "bm25",
+            "num_documents": len(self.documents),
+            "query_terms": len(tokenized_query)
+        }
+        
+        return result_docs, result_scores, metadata
+    
+    def get_stats(self) -> Dict:
+        """Get statistics about the retriever"""
+        stats = {
+            "method": self.method,
+            "num_documents": len(self.documents)
+        }
+        
+        if self.method == "tfidf" and self.tfidf_vectorizer:
+            stats["vocab_size"] = len(self.tfidf_vectorizer.vocabulary_)
+            stats["matrix_shape"] = self.tfidf_matrix.shape
+        
+        return stats

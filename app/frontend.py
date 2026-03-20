@@ -3,7 +3,7 @@ import requests
 import json
 from typing import Optional
 
-TITLE = " Graph RAG System"
+TITLE = " RAG System: Graph vs Vector"
 BACKEND_URL = "http://localhost:8000"
 
 def chat_send(message, history, rag_state):
@@ -20,7 +20,8 @@ def chat_send(message, history, rag_state):
                 "top_k": rag_state.get("top_k", 5),
                 "temperature": rag_state.get("temperature", 0.2),
                 "model": rag_state.get("model", "openai/gpt-4o-mini"),
-                "retrieval_mode": rag_state.get("retrieval_mode", "graph_rag"),
+                "retrieval_mode": rag_state.get("retrieval_mode", "graph"),
+                "vector_method": rag_state.get("vector_method", "tfidf"),
                 "use_entity_context": rag_state.get("use_entity_context", True)
             },
             timeout=60
@@ -46,19 +47,26 @@ def chat_send(message, history, rag_state):
             # Format metadata
             if metadata:
                 metadata_md = "##  Retrieval Metadata\n\n"
-                metadata_md += f"- **Method**: {metadata.get('method', 'N/A')}\n"
+                method = metadata.get('method', 'N/A')
+                metadata_md += f"- **Method**: {method.upper()}\n"
                 
+                # Graph-specific metadata
                 if 'query_entities' in metadata:
                     metadata_md += f"- **Query Entities**: {metadata['query_entities']}\n"
+                if 'matched_entities' in metadata:
+                    metadata_md += f"- **Matched Entities**: {metadata['matched_entities']}\n"
                 
+                # Vector-specific metadata
+                if 'vocab_size' in metadata:
+                    metadata_md += f"- **Vocabulary Size**: {metadata['vocab_size']}\n"
+                if 'query_terms' in metadata:
+                    metadata_md += f"- **Query Terms**: {metadata['query_terms']}\n"
+                
+                # Graph stats
                 if 'graph_stats' in metadata:
                     stats = metadata['graph_stats']
                     metadata_md += f"- **Graph Entities**: {stats.get('num_entities', 0)}\n"
                     metadata_md += f"- **Graph Relations**: {stats.get('num_relations', 0)}\n"
-                
-                if 'vector_weight' in metadata:
-                    metadata_md += f"- **Vector Weight**: {metadata['vector_weight']:.2f}\n"
-                    metadata_md += f"- **Graph Weight**: {metadata['graph_weight']:.2f}\n"
             else:
                 metadata_md = ""
         else:
@@ -106,10 +114,11 @@ def get_system_stats():
             
             if data.get('vector_stats'):
                 vs = data['vector_stats']
-                stats_md += "### Vector Store\n"
+                stats_md += "### Vector Retriever\n"
+                stats_md += f"- Method: {vs.get('method', 'N/A').upper()}\n"
                 stats_md += f"- Documents: {vs.get('num_documents', 0)}\n"
-                stats_md += f"- Embedding Dim: {vs.get('embedding_dimension', 0)}\n"
-                stats_md += f"- Size: {vs.get('total_size_mb', 0):.2f} MB\n"
+                if 'vocab_size' in vs:
+                    stats_md += f"- Vocabulary Size: {vs.get('vocab_size', 0)}\n"
             
             return stats_md
         else:
@@ -311,7 +320,8 @@ with gr.Blocks(title=TITLE, css=CSS) as demo:
         "top_k": 5,
         "temperature": 0.2,
         "model": "openai/gpt-4o-mini",
-        "retrieval_mode": "graph_rag",
+        "retrieval_mode": "graph",
+        "vector_method": "tfidf",
         "use_entity_context": True
     })
     settings_open = gr.State(False)
@@ -319,23 +329,30 @@ with gr.Blocks(title=TITLE, css=CSS) as demo:
     settings_btn = gr.Button("⚙️", elem_id="settings_btn", scale=0)
 
     with gr.Column(visible=False, elem_id="settings_panel") as settings_panel:
-        gr.Markdown("### ⚙️ Graph RAG Settings")
+        gr.Markdown("### ⚙️ RAG Settings")
         
         top_k = gr.Slider(1, 20, value=5, step=1, label="📊 Context Size (Top-K)")
         temperature = gr.Slider(0.0, 1.0, value=0.2, step=0.05, label="🌡️ Temperature")
         model_name = gr.Textbox(value="openai/gpt-4o-mini", label="🤖 Model")
         
         retrieval_mode = gr.Radio(
-            choices=["graph_rag", "vector", "hybrid"],
-            value="graph_rag",
-            label=" Retrieval Mode",
-            info="graph_rag: Graph+Vector, vector: Vector only, hybrid: Full hybrid"
+            choices=["graph", "vector"],
+            value="graph",
+            label="🔍 Retrieval Mode",
+            info="graph: Knowledge graph-based | vector: TF-IDF or BM25"
+        )
+        
+        vector_method = gr.Radio(
+            choices=["tfidf", "bm25"],
+            value="tfidf",
+            label="📐 Vector Method",
+            info="Only used when retrieval_mode='vector'"
         )
         
         use_entity_context = gr.Checkbox(
             value=True,
-            label=" Use Entity Context",
-            info="Include knowledge graph entity relationships"
+            label="🔗 Use Entity Context",
+            info="Include entity relationships (graph mode only)"
         )
         
         close_settings_btn = gr.Button("✕ Close", elem_id="close_settings_btn")
@@ -343,8 +360,8 @@ with gr.Blocks(title=TITLE, css=CSS) as demo:
     with gr.Column(elem_id="main_col"):
         gr.Markdown(f"# {TITLE}", elem_id="title_md")
         gr.Markdown(
-            "Advanced RAG system with **Knowledge Graph** integration. "
-            "Combines vector similarity with entity relationships for better retrieval.",
+            "Compare **Graph RAG** (entity-based) vs **Vector RAG** (TF-IDF/BM25). "
+            "Two distinct retrieval approaches for different query types.",
             elem_id="subtitle"
         )
 
@@ -380,19 +397,20 @@ with gr.Blocks(title=TITLE, css=CSS) as demo:
     close_settings_btn.click(lambda: (gr.update(visible=False), False), outputs=[settings_panel, settings_open])
 
     # Update state
-    def update_state(top_k, temperature, model, mode, use_entities, state):
+    def update_state(top_k, temperature, model, mode, vec_method, use_entities, state):
         state = dict(state or {})
         state["top_k"] = int(top_k)
         state["temperature"] = float(temperature)
         state["model"] = model
         state["retrieval_mode"] = mode
+        state["vector_method"] = vec_method
         state["use_entity_context"] = use_entities
         return state
 
-    for component in [top_k, temperature, model_name, retrieval_mode, use_entity_context]:
+    for component in [top_k, temperature, model_name, retrieval_mode, vector_method, use_entity_context]:
         component.change(
             update_state,
-            inputs=[top_k, temperature, model_name, retrieval_mode, use_entity_context, rag_state],
+            inputs=[top_k, temperature, model_name, retrieval_mode, vector_method, use_entity_context, rag_state],
             outputs=[rag_state]
         )
 
