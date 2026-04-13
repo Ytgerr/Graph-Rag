@@ -1,98 +1,113 @@
-# RAG System
+# RAG System — Graph (Neo4j) vs Vector (ChromaDB)
 
-A simple RAG system with FastAPI backend and Gradio frontend.
+Два режима поиска:
+- **Graph RAG** — spaCy NER → Neo4j → обход графа
+- **Vector RAG** — OpenRouter embeddings → ChromaDB → cosine similarity
 
-## Installation
+FastAPI бэкенд + Gradio фронтенд.
 
-### 1. Install uv
+---
 
-`uv` is a fast Python package manager.
+## Установка
 
-**Option A - Official installer (recommended):**
+### 1. uv
 
-**Windows:**
 ```bash
+# Windows
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
 
-**Mac/Linux:**
-```bash
+# Mac/Linux
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-**Option B - Using pip:**
-```bash
-pip install uv
-```
-
-Or download from: https://github.com/astral-sh/uv/releases
-
-### 2. Install project dependencies
+### 2. Зависимости
 
 ```bash
 uv sync
 ```
 
+---
 
-## Quick Start
+## Запуск
 
-### 1. Create .env file
+### 1. Neo4j через Docker
 
-Create a `.env` file in the project root and add your API key:
-
+```bash
+docker compose up -d
 ```
-OPENAI_API_KEY=sk-your-api-key-here
 
+Поднимает Neo4j на `bolt://localhost:7687` (логин `neo4j` / пароль `password`).
+
+Веб-интерфейс Neo4j: http://localhost:7474
+
+### 2. `.env`
+
+```bash
+cp .env_example .env
 ```
-Also you need use some proxy(VPN).
 
-### 2. Run both services
+Заполнить `OPENAI_API_KEY` (ключ OpenRouter).
 
-**Terminal 1 - Backend (API):**
+### 3. Backend + Frontend
+
+**Терминал 1:**
 ```bash
 uv run backend
 ```
-Runs on `http://localhost:8000`
+→ http://localhost:8002
 
-**Terminal 2 - Frontend (Web interface):**
+**Терминал 2:**
 ```bash
 uv run frontend
 ```
-Opens at `http://localhost:7860`
+→ http://localhost:7860
 
 ---
 
-## Using the system
+## Использование
 
-1. Open in browser: **http://localhost:7860**
-2. Enter your question about AI and RAG theme in the input field 
-3. The system will find relevant documents and provide an answer
-4. Use the settings button to adjust parameters (Top-K, Temperature)
+1. Открыть http://localhost:7860
+2. ⚙️ → выбрать режим: **graph** (Neo4j) или **vector** (ChromaDB)
+3. Задать вопрос
+4. Ответ + источники + метаданные отображаются в чате
 
 ---
 
-## Parameters
+## Параметры
 
-- **Top-K** - number of similar documents to use (1-20)
-- **Temperature** - answer creativity (0.0 = precise, 1.0 = creative)
-- **Retrieval metrics ** - simple cosine similarity or enchanced cosine similarity with spacy
+| Параметр | Описание | Диапазон |
+|----------|----------|----------|
+| Top-K | Кол-во документов | 1–20 |
+| Temperature | Креативность LLM | 0.0–1.0 |
+| LLM Model | Модель OpenRouter | `openai/gpt-4o-mini` |
+| Retrieval Mode | Режим поиска | `graph` / `vector` |
+| Entity Context | Контекст сущностей (только graph) | on/off |
+
 ---
 
-## API Documentation
+## API
 
-When the backend is running, view the documentation at:
-- Swagger UI: **http://localhost:8000/docs**
+Swagger UI: http://localhost:8000/docs
 
+| Метод | Эндпоинт | Описание |
+|-------|----------|----------|
+| POST | `/query` | Запрос к RAG |
+| GET | `/health` | Проверка здоровья |
+| GET | `/stats` | Статистика системы |
+| GET | `/graph/entities` | Топ сущностей из Neo4j |
+| GET | `/graph/relations` | Топ связей из Neo4j |
+
+---
+
+## Остановка
+
+```bash
+docker compose down
+```
 
 ## Troubleshooting
 
-**Error: "Cannot connect to backend"**
-- Make sure you started the backend in a separate terminal: `uv run backend`
-
-**Error: "OPENAI_API_KEY not found"**
-- Check that the `.env` file exists in the project root with the correct key
-- Extension must be `.env` (not `.env.txt`)
-
-**Slow performance**
-- This is normal on first run (models and indexes are loading)
-- Subsequent requests will be faster
+- **Cannot connect to backend** — запустите `uv run backend` в отдельном терминале
+- **OPENAI_API_KEY not found** — проверьте `.env` файл
+- **Neo4j connection failed** — убедитесь что `docker compose up -d` выполнен, проверьте http://localhost:7474
+- **Embedding failed** — проверьте что ключ OpenRouter имеет доступ к embedding моделям

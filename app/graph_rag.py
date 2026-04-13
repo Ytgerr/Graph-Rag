@@ -1,413 +1,434 @@
+"""Graph RAG using LlamaIndex PropertyGraphIndex + Neo4j.
+
+LlamaIndex handles:
+- LLM-based entity and relation extraction (SchemaLLMPathExtractor)
+- Storage in Neo4j via Neo4jPropertyGraphStore
+- Retrieval via LLMSynonymRetriever + VectorContextRetriever
+- Re-ranking via embedding cosine similarity
+"""
+
+import hashlib
 import logging
-from typing import List, Dict, Tuple, Optional, Set
+import os
+import time
+from typing import List, Dict, Tuple, Optional
+
 import numpy as np
-from collections import defaultdict
-import re
-import spacy
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-import networkx as nx
+from llama_index.core import PropertyGraphIndex, Document, Settings
+from llama_index.core.indices.property_graph import (
+    LLMSynonymRetriever,
+    VectorContextRetriever,
+)
+from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
+from llama_index.llms.openai_like import OpenAILike
+from llama_index.embeddings.openai import OpenAIEmbedding
 
 logger = logging.getLogger(__name__)
 
 
-class Entity:
-    """Represents an entity in the knowledge graph"""
-    
-    def __init__(self, text: str, entity_type: str, doc_id: int):
-        self.text = text.lower().strip()
-        self.entity_type = entity_type
-        self.doc_ids = {doc_id}
-        self.frequency = 1
-    
-    def add_occurrence(self, doc_id: int):
-        """Add another occurrence of this entity"""
-        self.doc_ids.add(doc_id)
-        self.frequency += 1
-    
-    def __hash__(self):
-        return hash(self.text)
-    
-    def __eq__(self, other):
-        return isinstance(other, Entity) and self.text == other.text
-    
-    def __repr__(self):
-        return f"Entity({self.text}, {self.entity_type}, freq={self.frequency})"
+def _make_llm(model: str = "openai/gpt-4o-mini", temperature: float = 0.0) -> OpenAILike:
+    """Create an OpenRouter-compatible LLM for LlamaIndex."""
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    return OpenAILike(
+        model=model,
+        api_key=api_key,
+        api_base="https://openrouter.ai/api/v1",
+        temperature=temperature,
+        max_tokens=2048,
+        is_chat_model=True,
+    )
 
 
-class Relation:
-    """Represents a relation between entities"""
-    
-    def __init__(self, source: Entity, target: Entity, relation_type: str, doc_id: int):
-        self.source = source
-        self.target = target
-        self.relation_type = relation_type
-        self.doc_ids = {doc_id}
-        self.weight = 1.0
-    
-    def strengthen(self, doc_id: int):
-        """Strengthen the relation by adding another occurrence"""
-        self.doc_ids.add(doc_id)
-        self.weight += 0.5
-    
-    def __repr__(self):
-        return f"Relation({self.source.text} --[{self.relation_type}]--> {self.target.text})"
+def _make_embed_model(model: str = "text-embedding-3-small") -> OpenAIEmbedding:
+    """Create an OpenRouter-compatible embedding model."""
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    return OpenAIEmbedding(
+        model=model,
+        api_key=api_key,
+        api_base="https://openrouter.ai/api/v1",
+    )
 
 
-class KnowledgeGraph:
-    """Knowledge graph for storing entities and relations"""
-    
-    def __init__(self):
-        self.graph = nx.DiGraph()
-        self.entities: Dict[str, Entity] = {}
-        self.relations: List[Relation] = []
-        self.doc_entities: Dict[int, Set[str]] = defaultdict(set)
-    
-    def add_entity(self, entity: Entity, doc_id: int) -> Entity:
-        """Add or update an entity in the graph"""
-        if entity.text in self.entities:
-            existing = self.entities[entity.text]
-            existing.add_occurrence(doc_id)
-            self.doc_entities[doc_id].add(entity.text)
-            return existing
-        else:
-            self.entities[entity.text] = entity
-            self.graph.add_node(entity.text, entity_type=entity.entity_type, frequency=entity.frequency)
-            self.doc_entities[doc_id].add(entity.text)
-            return entity
-    
-    def add_relation(self, relation: Relation, doc_id: int):
-        """Add or update a relation in the graph"""
-        # Check if relation already exists
-        for existing_rel in self.relations:
-            if (existing_rel.source.text == relation.source.text and 
-                existing_rel.target.text == relation.target.text and
-                existing_rel.relation_type == relation.relation_type):
-                existing_rel.strengthen(doc_id)
-                self.graph[relation.source.text][relation.target.text]['weight'] = existing_rel.weight
-                return
-
-        self.relations.append(relation)
-        if not self.graph.has_edge(relation.source.text, relation.target.text):
-            self.graph.add_edge(
-                relation.source.text,
-                relation.target.text,
-                relation_type=relation.relation_type,
-                weight=relation.weight
-            )
-    
-    def get_entity_neighbors(self, entity_text: str, max_depth: int = 2) -> Set[str]:
-        """Get neighboring entities up to max_depth hops"""
-        if entity_text not in self.graph:
-            return set()
-        
-        neighbors = set()
-        current_level = {entity_text}
-        
-        for _ in range(max_depth):
-            next_level = set()
-            for node in current_level:
-                next_level.update(self.graph.successors(node))
-                next_level.update(self.graph.predecessors(node))
-            neighbors.update(next_level)
-            current_level = next_level - neighbors
-            if not current_level:
-                break
-        
-        return neighbors
-    
-    def get_subgraph_for_entities(self, entity_texts: List[str], max_depth: int = 2) -> nx.DiGraph:
-        """Extract a subgraph containing specified entities and their neighbors"""
-        all_nodes = set(entity_texts)
-        for entity_text in entity_texts:
-            all_nodes.update(self.get_entity_neighbors(entity_text, max_depth))
-        
-        return self.graph.subgraph(all_nodes)
-    
-    def get_documents_for_entity(self, entity_text: str) -> Set[int]:
-        """Get all document IDs containing this entity"""
-        if entity_text in self.entities:
-            return self.entities[entity_text].doc_ids
-        return set()
-    
-    def get_entities_for_document(self, doc_id: int) -> Set[str]:
-        """Get all entities in a document"""
-        return self.doc_entities.get(doc_id, set())
-    
-    def get_graph_stats(self) -> Dict:
-        """Get statistics about the knowledge graph"""
-        return {
-            "num_entities": len(self.entities),
-            "num_relations": len(self.relations),
-            "num_nodes": self.graph.number_of_nodes(),
-            "num_edges": self.graph.number_of_edges(),
-            "avg_degree": sum(dict(self.graph.degree()).values()) / max(self.graph.number_of_nodes(), 1)
-        }
-
-
-class GraphExtractor:
-    """Extract entities and relations from text using NLP"""
-    
-    def __init__(self, nlp_model=None):
-        self.nlp = nlp_model or spacy.load("en_core_web_sm")
-        
-        self.entity_types = {
-            'PERSON', 'ORG', 'GPE', 'PRODUCT', 'EVENT',
-            'WORK_OF_ART', 'LAW', 'LANGUAGE', 'NORP'
-        }
-        
-        # Technical terms that should be treated as entities
-        self.technical_terms = {
-            'transformer', 'transformers', 'attention mechanism', 'attention',
-            'neural network', 'neural networks', 'deep learning',
-            'machine learning', 'gpt', 'gpt-3', 'gpt-4', 'bert',
-            'rag', 'retrieval augmented generation', 'llm', 'large language model',
-            'embedding', 'embeddings', 'vector', 'vectors',
-            'knowledge graph', 'knowledge graphs', 'entity', 'entities',
-            'nlp', 'natural language processing', 'ai', 'artificial intelligence',
-            'encoder', 'decoder', 'self-attention', 'multi-head attention',
-            'feedforward', 'layer normalization', 'positional encoding'
-        }
-  
-        self.relation_patterns = [
-            ('nsubj', 'dobj'),      # subject-verb-object
-            ('nsubj', 'attr'),      # subject-verb-attribute
-            ('nsubj', 'prep'),      # subject-verb-preposition
-            ('compound', 'pobj'),   # compound-preposition-object
-        ]
-    
-    def extract_entities(self, text: str, doc_id: int) -> List[Entity]:
-        """Extract named entities from text including technical terms"""
-        doc = self.nlp(text)
-        entities = []
-        text_lower = text.lower()
-
-        # Extract named entities
-        for ent in doc.ents:
-            if ent.label_ in self.entity_types:
-                entity = Entity(ent.text, ent.label_, doc_id)
-                entities.append(entity)
-        
-        # Extract technical terms (case-insensitive matching)
-        for term in self.technical_terms:
-            if term in text_lower:
-                entity = Entity(term, 'TECHNICAL_TERM', doc_id)
-                entities.append(entity)
-        
-        # Extract noun chunks as concepts
-        for chunk in doc.noun_chunks:
-            chunk_text = chunk.text.lower()
-            # Filter out very short or very long chunks
-            if 2 <= len(chunk.text.split()) <= 5:
-                # Skip if already captured as technical term
-                if chunk_text not in self.technical_terms:
-                    entity = Entity(chunk.text, 'CONCEPT', doc_id)
-                    entities.append(entity)
-        
-        return entities
-    
-    def extract_relations(self, text: str, doc_id: int, entities: List[Entity]) -> List[Relation]:
-        """Extract relations between entities"""
-        doc = self.nlp(text)
-        relations = []
-        entity_map = {e.text.lower(): e for e in entities}
-        
-        # Extract relations based on dependency parsing
-        for token in doc:
-            if token.pos_ == 'VERB':
-                # Find subject and object
-                subjects = [child for child in token.children if child.dep_ in ('nsubj', 'nsubjpass')]
-                objects = [child for child in token.children if child.dep_ in ('dobj', 'attr', 'pobj')]
-                
-                for subj in subjects:
-                    for obj in objects:
-                        subj_text = subj.text.lower()
-                        obj_text = obj.text.lower()
-                        
-                        # Check if both are entities
-                        if subj_text in entity_map and obj_text in entity_map:
-                            relation = Relation(
-                                entity_map[subj_text],
-                                entity_map[obj_text],
-                                token.lemma_,
-                                doc_id
-                            )
-                            relations.append(relation)
-        
-        # Extract co-occurrence relations (entities in same sentence)
-        for sent in doc.sents:
-            sent_entities = []
-            for ent in sent.ents:
-                if ent.text.lower() in entity_map:
-                    sent_entities.append(entity_map[ent.text.lower()])
-            
-            # Create co-occurrence relations
-            for i, e1 in enumerate(sent_entities):
-                for e2 in sent_entities[i+1:]:
-                    relation = Relation(e1, e2, 'co-occurs', doc_id)
-                    relations.append(relation)
-        
-        return relations
+def _cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
+    """Compute cosine similarity between two vectors."""
+    a = np.array(vec_a, dtype=np.float32)
+    b = np.array(vec_b, dtype=np.float32)
+    dot = np.dot(a, b)
+    norm = np.linalg.norm(a) * np.linalg.norm(b)
+    return float(dot / norm) if norm > 0 else 0.0
 
 
 class GraphRAGRetriever:
-    """Pure graph-based retrieval using knowledge graph structure with TF-IDF fallback"""
-    
-    def __init__(self):
-        self.knowledge_graph = KnowledgeGraph()
-        self.graph_extractor = GraphExtractor()
+    """Graph RAG powered by LlamaIndex PropertyGraphIndex.
+
+    Build pipeline:
+        raw documents -> merge small docs -> LlamaIndex Documents
+        -> PropertyGraphIndex -> LLM extracts entities & relations
+        -> stored in Neo4j with embeddings
+
+    Retrieval pipeline:
+        query -> LLMSynonymRetriever (entity expansion via LLM)
+              -> VectorContextRetriever (embedding-based node lookup)
+              -> merge & deduplicate -> re-rank by cosine similarity
+              -> top_k results -> context for answer generation
+    """
+
+    def __init__(
+        self,
+        neo4j_uri: Optional[str] = None,
+        neo4j_user: Optional[str] = None,
+        neo4j_password: Optional[str] = None,
+        llm_model: str = "openai/gpt-4o-mini",
+        max_triplets_per_chunk: int = 3,
+    ):
+        self.neo4j_uri = neo4j_uri or os.getenv("NEO4J_URI", "bolt://localhost:7687")
+        self.neo4j_user = neo4j_user or os.getenv("NEO4J_USER", "neo4j")
+        self.neo4j_password = neo4j_password or os.getenv("NEO4J_PASSWORD", "password")
+        self.llm_model = llm_model
+        self.max_triplets_per_chunk = max_triplets_per_chunk
+
+        # LlamaIndex global settings
+        self.llm = _make_llm(model=llm_model)
+        embed_model_name = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+        if "/" in embed_model_name:
+            embed_model_name = embed_model_name.split("/", 1)[1]
+        self.embed_model = _make_embed_model(model=embed_model_name)
+
+        Settings.llm = self.llm
+        Settings.embed_model = self.embed_model
+        Settings.chunk_size = 1024
+        Settings.chunk_overlap = 128
+
+        self._graph_store: Optional[Neo4jPropertyGraphStore] = None
+        self._index: Optional[PropertyGraphIndex] = None
+        self._synonym_retriever: Optional[LLMSynonymRetriever] = None
+        self._vector_retriever: Optional[VectorContextRetriever] = None
         self.documents: List[str] = []
-        
-        # Add TF-IDF fallback for better recall
-        self.vectorizer = TfidfVectorizer(
-            stop_words='english',
-            use_idf=True,
-            norm='l2',
-            ngram_range=(1, 2),
-            max_features=3000,
-            sublinear_tf=True
+
+        logger.info("GraphRAGRetriever initialized (LlamaIndex + Neo4j, triplets=%d)",
+                     max_triplets_per_chunk)
+
+    def _create_graph_store(self) -> Neo4jPropertyGraphStore:
+        """Create a fresh Neo4j property graph store."""
+        return Neo4jPropertyGraphStore(
+            username=self.neo4j_user,
+            password=self.neo4j_password,
+            url=self.neo4j_uri,
         )
-        self.tfidf_matrix = None
-    
-    def build_graph(self, documents: List[str]):
-        """Build knowledge graph from documents"""
-        logger.info(f"Building knowledge graph from {len(documents)} documents...")
+
+    # ── Dataset hash tracking ──
+
+    @staticmethod
+    def _compute_dataset_hash(documents: List[str]) -> str:
+        """Compute a hash of the dataset to detect changes."""
+        content = "\n".join(documents)
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+
+    def _get_stored_hash(self) -> Optional[str]:
+        """Get the dataset hash stored in Neo4j (if any)."""
+        try:
+            store = self._create_graph_store()
+            result = store.structured_query(
+                "MATCH (m:__DatasetMeta__) RETURN m.hash AS hash LIMIT 1"
+            )
+            if result and len(result) > 0:
+                row = result[0] if isinstance(result, list) else result
+                return row.get("hash") if isinstance(row, dict) else None
+        except Exception:
+            pass
+        return None
+
+    def _store_hash(self, dataset_hash: str):
+        """Store the dataset hash in Neo4j for future comparison."""
+        try:
+            self._graph_store.structured_query(
+                "MERGE (m:__DatasetMeta__) SET m.hash = $hash",
+                param_map={"hash": dataset_hash},
+            )
+        except Exception as e:
+            logger.warning("Could not store dataset hash: %s", e)
+
+    def _graph_has_matching_data(self, documents: List[str]) -> bool:
+        """Check if Neo4j has graph data built from the same dataset."""
+        current_hash = self._compute_dataset_hash(documents)
+        stored_hash = self._get_stored_hash()
+        if stored_hash and stored_hash == current_hash:
+            logger.info("Dataset hash matches Neo4j (%s), graph is up to date", current_hash)
+            return True
+        if stored_hash:
+            logger.info("Dataset hash changed: stored=%s, current=%s — rebuild needed",
+                        stored_hash, current_hash)
+        else:
+            logger.info("No dataset hash in Neo4j — checking if graph has any data")
+            try:
+                store = self._create_graph_store()
+                result = store.structured_query("MATCH (n) RETURN count(n) AS cnt LIMIT 1")
+                if result and len(result) > 0:
+                    row = result[0] if isinstance(result, list) else result
+                    cnt = row.get("cnt", 0) if isinstance(row, dict) else 0
+                    if cnt > 0:
+                        logger.info("Neo4j has %d nodes but no hash — will rebuild to track hash", cnt)
+                        return False
+            except Exception:
+                pass
+        return False
+
+    # ── Document merging ──
+
+    @staticmethod
+    def _merge_small_docs(documents: List[str], target_size: int = 2000) -> List[str]:
+        """Merge small documents into larger batches to reduce LLM calls.
+
+        Each LLM extraction call has overhead, so combining small paragraphs
+        (e.g. 100-300 chars) into ~2000-char batches reduces total calls
+        from ~841 to ~120-150 while preserving all content.
+        """
+        merged: List[str] = []
+        current = ""
+        for doc in documents:
+            if len(current) + len(doc) + 2 <= target_size:
+                current = f"{current}\n\n{doc}".strip()
+            else:
+                if current:
+                    merged.append(current)
+                current = doc
+        if current:
+            merged.append(current)
+        return merged
+
+    # ── Retriever caching ──
+
+    def _build_retrievers(self, top_k: int = 5):
+        """Build and cache the retriever instances.
+
+        Caching avoids re-creating retrievers on every query call.
+        """
+        if not self._index:
+            return
+
+        self._synonym_retriever = LLMSynonymRetriever(
+            self._index.property_graph_store,
+            llm=self.llm,
+            include_text=True,
+            max_keywords=10,
+        )
+
+        self._vector_retriever = VectorContextRetriever(
+            self._index.property_graph_store,
+            embed_model=self.embed_model,
+            include_text=True,
+            similarity_top_k=top_k * 2,  # fetch more for re-ranking
+        )
+
+        logger.info("Retrievers built (synonym + vector, fetch_k=%d)", top_k * 2)
+
+    # ── Build ──
+
+    def build_graph(self, documents: List[str], force_rebuild: bool = False):
+        """Build the knowledge graph from raw documents using LlamaIndex.
+
+        Optimizations:
+        - Skips rebuild if Neo4j already has data with matching hash
+        - Merges small documents into larger batches to reduce LLM API calls
+        - Configurable max_triplets_per_chunk for extraction density
+        - Includes embeddings for hybrid retrieval
+
+        LlamaIndex will:
+        1. Chunk documents (using Settings.chunk_size)
+        2. Extract entities and relations via LLM (SchemaLLMPathExtractor)
+        3. Store everything in Neo4j with embeddings
+        """
         self.documents = documents
-        
-        for doc_id, doc_text in enumerate(documents):
-            # Extract entities
-            entities = self.graph_extractor.extract_entities(doc_text, doc_id)
-            
-            added_entities = []
-            for entity in entities:
-                added_entity = self.knowledge_graph.add_entity(entity, doc_id)
-                added_entities.append(added_entity)
-            
-            # Extract relations
-            relations = self.graph_extractor.extract_relations(doc_text, doc_id, added_entities)
-            for relation in relations:
-                self.knowledge_graph.add_relation(relation, doc_id)
-        
-        # Build TF-IDF index for fallback
-        self.tfidf_matrix = self.vectorizer.fit_transform(documents)
-        
-        stats = self.knowledge_graph.get_graph_stats()
-        logger.info(f"Knowledge graph built: {stats}")
-    
-    def retrieve(self, query: str, top_k: int = 5) -> Tuple[List[str], List[float], Dict]:
-        """Retrieve documents using graph-based approach with TF-IDF fallback"""
-        # Extract entities from query
-        query_entities = self.graph_extractor.extract_entities(query, -1)
-        
-        # Try graph-based retrieval first
-        if query_entities:
-            # Find matching entities in graph
-            matched_entities = []
-            for q_entity in query_entities:
-                if q_entity.text in self.knowledge_graph.entities:
-                    matched_entities.append(q_entity.text)
-            
-            if matched_entities:
-                # Get documents containing these entities and their neighbors
-                doc_scores = defaultdict(float)
-                
-                for entity_text in matched_entities:
-                    # Direct match - high score
-                    direct_docs = self.knowledge_graph.get_documents_for_entity(entity_text)
-                    for doc_id in direct_docs:
-                        doc_scores[doc_id] += 1.0
-                    
-                    # Neighbor entities - medium score (1-hop traversal)
-                    neighbors = self.knowledge_graph.get_entity_neighbors(entity_text, max_depth=1)
-                    for neighbor in neighbors:
-                        neighbor_docs = self.knowledge_graph.get_documents_for_entity(neighbor)
-                        for doc_id in neighbor_docs:
-                            doc_scores[doc_id] += 0.5
-                
-                # Sort by score
-                sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
-                
-                if sorted_docs:
-                    doc_ids = [doc_id for doc_id, _ in sorted_docs]
-                    scores = [score for _, score in sorted_docs]
-                    
-                    # Normalize scores
-                    max_score = max(scores) if scores else 1.0
-                    scores = [s / max_score for s in scores]
-                    
-                    # Prepare metadata
-                    metadata = {
-                        "method": "graph",
-                        "query_entities": len(query_entities),
-                        "matched_entities": len(matched_entities),
-                        "graph_stats": self.knowledge_graph.get_graph_stats()
-                    }
-                    
-                    return (
-                        [self.documents[i] for i in doc_ids],
-                        scores,
-                        metadata
-                    )
-        
-        # Fallback to TF-IDF if no entities found or no matches
-        logger.info("Using TF-IDF fallback (no entities matched)")
-        
-        if self.tfidf_matrix is None:
-            logger.warning("TF-IDF matrix not built")
-            return [], [], {"method": "graph_fallback", "query_entities": len(query_entities), "matched_entities": 0}
-        
-        # TF-IDF retrieval
-        query_vector = self.vectorizer.transform([query])
-        similarities = cosine_similarity(query_vector, self.tfidf_matrix)[0]
-        
-        # Get top-k
-        top_indices = np.argsort(similarities)[-top_k:][::-1]
-        top_scores = similarities[top_indices]
-        
-        # Filter out zero scores
-        valid_results = [(idx, score) for idx, score in zip(top_indices, top_scores) if score > 0]
-        
-        if not valid_results:
-            return [], [], {"method": "graph_fallback", "query_entities": len(query_entities), "matched_entities": 0}
-        
-        doc_ids = [idx for idx, _ in valid_results]
-        scores = [score for _, score in valid_results]
-        
-        metadata = {
-            "method": "graph_fallback",
-            "query_entities": len(query_entities),
-            "matched_entities": 0,
-            "fallback_reason": "no_entity_matches"
-        }
-        
-        return (
-            [self.documents[i] for i in doc_ids],
-            scores,
-            metadata
+
+        # Check if graph already exists in Neo4j with matching dataset
+        if not force_rebuild and self._graph_has_matching_data(documents):
+            logger.info("Graph is up to date, skipping rebuild.")
+            self._graph_store = self._create_graph_store()
+            self._index = PropertyGraphIndex.from_existing(
+                property_graph_store=self._graph_store,
+                llm=self.llm,
+                embed_model=self.embed_model,
+            )
+            self._build_retrievers()
+            logger.info("Connected to existing graph index")
+            return
+
+        t0 = time.time()
+        dataset_hash = self._compute_dataset_hash(documents)
+        logger.info("Building knowledge graph from %d documents (hash=%s) via LlamaIndex...",
+                     len(documents), dataset_hash)
+
+        # Merge small docs to reduce LLM calls
+        merged_docs = self._merge_small_docs(documents, target_size=2000)
+        logger.info("Merged %d documents into %d batches for extraction "
+                     "(max_triplets_per_chunk=%d)",
+                     len(documents), len(merged_docs), self.max_triplets_per_chunk)
+
+        # Clear old data and recreate graph store
+        self._graph_store = self._create_graph_store()
+        try:
+            self._graph_store.structured_query("MATCH (n) DETACH DELETE n")
+            logger.info("Cleared old graph data from Neo4j")
+        except Exception as e:
+            logger.warning("Could not clear Neo4j: %s", e)
+
+        # Convert to LlamaIndex Documents
+        llama_docs = [
+            Document(text=doc, metadata={"batch_id": i})
+            for i, doc in enumerate(merged_docs)
+        ]
+
+        # Build PropertyGraphIndex — triggers LLM extraction + embedding storage
+        self._index = PropertyGraphIndex.from_documents(
+            llama_docs,
+            property_graph_store=self._graph_store,
+            llm=self.llm,
+            embed_model=self.embed_model,
+            max_triplets_per_chunk=self.max_triplets_per_chunk,
+            include_embeddings=True,
+            show_progress=True,
         )
-    
-    def get_entity_context(self, query: str, max_entities: int = 10) -> str:
-        """Get entity context from knowledge graph for query"""
-        query_entities = self.graph_extractor.extract_entities(query, -1)
-        
-        if not query_entities:
-            return ""
-        
-        context_parts = []
-        entity_count = 0
-        
-        for q_entity in query_entities:
-            if entity_count >= max_entities:
-                break
-                
-            if q_entity.text in self.knowledge_graph.entities:
-                entity = self.knowledge_graph.entities[q_entity.text]
-                neighbors = self.knowledge_graph.get_entity_neighbors(q_entity.text, max_depth=1)
-                
-                if neighbors:
-                    context_parts.append(
-                        f"Entity '{entity.text}' ({entity.entity_type}) is related to: {', '.join(list(neighbors)[:5])}"
-                    )
-                    entity_count += 1
-        
-        return "\n".join(context_parts) if context_parts else ""
+
+        # Store dataset hash for future comparison
+        self._store_hash(dataset_hash)
+
+        # Build cached retrievers
+        self._build_retrievers()
+
+        elapsed = time.time() - t0
+        stats = self.get_graph_stats()
+        logger.info("Knowledge graph built in %.1fs: %s", elapsed, stats)
+
+    # ── Retrieve with re-ranking ──
+
+    def retrieve(self, query: str, top_k: int = 5) -> Tuple[List[str], List[float], Dict]:
+        """Retrieve relevant context from the knowledge graph.
+
+        Pipeline:
+        1. LLMSynonymRetriever: LLM generates synonym/related entity names
+        2. VectorContextRetriever: embedding similarity on graph nodes
+        3. Merge and deduplicate results
+        4. Re-rank by cosine similarity between query embedding and node text
+        5. Return top_k results
+        """
+        if not self._index:
+            return [], [], {"method": "graph", "error": "Index not built"}
+
+        try:
+            # Ensure retrievers exist
+            if not self._synonym_retriever or not self._vector_retriever:
+                self._build_retrievers(top_k)
+
+            # Retrieve from both strategies
+            synonym_nodes = self._synonym_retriever.retrieve(query)
+            vector_nodes = self._vector_retriever.retrieve(query)
+
+            # Merge and deduplicate
+            seen_texts = set()
+            all_nodes = []
+            for node in synonym_nodes + vector_nodes:
+                text = node.text.strip()
+                if text and text not in seen_texts:
+                    seen_texts.add(text)
+                    all_nodes.append(node)
+
+            if not all_nodes:
+                return [], [], {"method": "graph", "num_results": 0}
+
+            # Re-rank by cosine similarity to query embedding
+            try:
+                query_embedding = self.embed_model.get_query_embedding(query)
+                scored_nodes = []
+                for node in all_nodes:
+                    # Get node text embedding for re-ranking
+                    node_embedding = self.embed_model.get_text_embedding(node.text[:512])
+                    sim = _cosine_similarity(query_embedding, node_embedding)
+                    scored_nodes.append((node, sim))
+
+                # Sort by re-ranked similarity (descending)
+                scored_nodes.sort(key=lambda x: x[1], reverse=True)
+                top_nodes = scored_nodes[:top_k]
+
+                sources = [node.text for node, _ in top_nodes]
+                scores = [score for _, score in top_nodes]
+            except Exception as e:
+                logger.warning("Re-ranking failed, falling back to original scores: %s", e)
+                # Fallback: use original scores
+                all_nodes.sort(
+                    key=lambda n: n.score if n.score is not None else 0.0,
+                    reverse=True,
+                )
+                top_nodes_fallback = all_nodes[:top_k]
+                sources = [node.text for node in top_nodes_fallback]
+                scores = [
+                    node.score if node.score is not None else 0.5
+                    for node in top_nodes_fallback
+                ]
+
+            # Normalize scores to [0, 1]
+            max_score = max(scores) if scores else 1.0
+            if max_score > 0:
+                scores = [s / max_score for s in scores]
+
+            metadata = {
+                "method": "graph",
+                "num_results": len(sources),
+                "synonym_results": len(synonym_nodes),
+                "vector_results": len(vector_nodes),
+                "total_candidates": len(all_nodes),
+                "reranked": True,
+                "backend": "Neo4j + LlamaIndex",
+            }
+
+            return sources, scores, metadata
+
+        except Exception as e:
+            logger.error("Graph retrieval failed: %s", e)
+            return [], [], {"method": "graph", "error": str(e)}
+
+    # ── Stats ──
+
+    def get_graph_stats(self) -> Dict:
+        """Get statistics about the knowledge graph."""
+        if not self._graph_store:
+            return {
+                "num_entities": 0, "num_relations": 0,
+                "num_documents": 0, "backend": "Neo4j + LlamaIndex",
+            }
+
+        try:
+            query = (
+                "MATCH (n) WITH count(n) AS node_count "
+                "OPTIONAL MATCH ()-[r]->() "
+                "RETURN node_count, count(r) AS rel_count"
+            )
+            result = self._graph_store.structured_query(query)
+
+            if result and len(result) > 0:
+                row = result[0] if isinstance(result, list) else result
+                if isinstance(row, dict):
+                    num_nodes = row.get("node_count", 0)
+                    num_rels = row.get("rel_count", 0)
+                else:
+                    num_nodes = 0
+                    num_rels = 0
+            else:
+                num_nodes = 0
+                num_rels = 0
+
+            return {
+                "num_entities": num_nodes,
+                "num_relations": num_rels,
+                "num_documents": len(self.documents),
+                "max_triplets_per_chunk": self.max_triplets_per_chunk,
+                "backend": "Neo4j + LlamaIndex",
+            }
+        except Exception as e:
+            logger.error("Failed to get graph stats: %s", e)
+            return {
+                "num_entities": 0,
+                "num_relations": 0,
+                "num_documents": len(self.documents),
+                "backend": "Neo4j + LlamaIndex",
+                "error": str(e),
+            }

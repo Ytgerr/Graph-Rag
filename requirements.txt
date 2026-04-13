@@ -1,28 +1,15 @@
-# Core dependencies
-nltk
-openai
-python-dotenv
-scipy
-numpy
-pandas
-scikit-learn
 fastapi
 uvicorn
 gradio
 requests
-spacy
-matplotlib
-
-# Graph and network analysis
-networkx>=3.0
-
-# Optional: Better BM25 implementation
-rank-bm25
-
-# Optional: Local embeddings (fallback)
-sentence-transformers
-
-# NLP resources (will be downloaded automatically)
-# en_core_web_sm (spacy model)
-# wordnet (nltk corpus)
-# punkt (nltk tokenizer)
+python-dotenv
+openai
+numpy
+neo4j>=5.0
+chromadb>=0.4
+Wikipedia-API>=0.6
+beautifulsoup4
+llama-index-core
+llama-index-graph-stores-neo4j
+llama-index-llms-openai-like
+llama-index-embeddings-openai

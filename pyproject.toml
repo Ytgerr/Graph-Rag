@@ -1,7 +1,7 @@
 [project]
 name = "graph-rag-system"
-version = "2.0.0"
-description = "Advanced RAG system with Knowledge Graph integration"
+version = "4.0.0"
+description = "Graph RAG (LlamaIndex + Neo4j) vs Vector RAG (ChromaDB) comparison system"
 requires-python = ">=3.10"
 
 dependencies = [
@@ -11,19 +11,25 @@ dependencies = [
   "requests",
   "python-dotenv",
   "openai",
-  "scikit-learn",
   "numpy",
+  "neo4j>=5.0",
+  "chromadb>=0.4",
+  "Wikipedia-API>=0.6",
+  "beautifulsoup4",
+  "llama-index-core",
+  "llama-index-graph-stores-neo4j",
+  "llama-index-llms-openai-like",
+  "llama-index-embeddings-openai",
+]
+
+[project.optional-dependencies]
+experiments = [
+  "scikit-learn",
   "scipy",
   "pandas",
   "nltk",
   "spacy",
-  "networkx>=3.0",
   "matplotlib",
-  "rank-bm25",
-]
-
-[project.optional-dependencies]
-embeddings = [
   "sentence-transformers",
 ]
 
