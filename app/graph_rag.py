@@ -1,10 +1,4 @@
 """Graph RAG using LlamaIndex PropertyGraphIndex + Neo4j.
-
-LlamaIndex handles:
-- LLM-based entity and relation extraction (SchemaLLMPathExtractor)
-- Storage in Neo4j via Neo4jPropertyGraphStore
-- Retrieval via LLMSynonymRetriever + VectorContextRetriever
-- Re-ranking via embedding cosine similarity
 """
 
 import hashlib
@@ -18,6 +12,7 @@ from llama_index.core import PropertyGraphIndex, Document, Settings
 from llama_index.core.indices.property_graph import (
     LLMSynonymRetriever,
     VectorContextRetriever,
+    SimpleLLMPathExtractor,
 )
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 from llama_index.llms.openai_like import OpenAILike
@@ -73,6 +68,11 @@ class GraphRAGRetriever:
               -> top_k results -> context for answer generation
     """
 
+    # Number of parallel LLM workers for entity extraction
+    DEFAULT_NUM_WORKERS = 8
+    # Merge target: combine small paragraphs into batches of this size
+    DEFAULT_MERGE_TARGET = 4000
+
     def __init__(
         self,
         neo4j_uri: Optional[str] = None,
@@ -80,12 +80,14 @@ class GraphRAGRetriever:
         neo4j_password: Optional[str] = None,
         llm_model: str = "openai/gpt-4o-mini",
         max_triplets_per_chunk: int = 3,
+        num_workers: int = DEFAULT_NUM_WORKERS,
     ):
         self.neo4j_uri = neo4j_uri or os.getenv("NEO4J_URI", "bolt://localhost:7687")
         self.neo4j_user = neo4j_user or os.getenv("NEO4J_USER", "neo4j")
         self.neo4j_password = neo4j_password or os.getenv("NEO4J_PASSWORD", "password")
         self.llm_model = llm_model
         self.max_triplets_per_chunk = max_triplets_per_chunk
+        self.num_workers = num_workers
 
         # LlamaIndex global settings
         self.llm = _make_llm(model=llm_model)
@@ -96,7 +98,7 @@ class GraphRAGRetriever:
 
         Settings.llm = self.llm
         Settings.embed_model = self.embed_model
-        Settings.chunk_size = 1024
+        Settings.chunk_size = 2048   # larger chunks = fewer internal splits
         Settings.chunk_overlap = 128
 
         self._graph_store: Optional[Neo4jPropertyGraphStore] = None
@@ -105,8 +107,8 @@ class GraphRAGRetriever:
         self._vector_retriever: Optional[VectorContextRetriever] = None
         self.documents: List[str] = []
 
-        logger.info("GraphRAGRetriever initialized (LlamaIndex + Neo4j, triplets=%d)",
-                     max_triplets_per_chunk)
+        logger.info("GraphRAGRetriever initialized (LlamaIndex + Neo4j, triplets=%d, workers=%d)",
+                     max_triplets_per_chunk, num_workers)
 
     def _create_graph_store(self) -> Neo4jPropertyGraphStore:
         """Create a fresh Neo4j property graph store."""
@@ -176,12 +178,12 @@ class GraphRAGRetriever:
     # ── Document merging ──
 
     @staticmethod
-    def _merge_small_docs(documents: List[str], target_size: int = 2000) -> List[str]:
+    def _merge_small_docs(documents: List[str], target_size: int = 4000) -> List[str]:
         """Merge small documents into larger batches to reduce LLM calls.
 
         Each LLM extraction call has overhead, so combining small paragraphs
-        (e.g. 100-300 chars) into ~2000-char batches reduces total calls
-        from ~841 to ~120-150 while preserving all content.
+        (e.g. 100-300 chars) into ~4000-char batches significantly reduces
+        total calls while preserving all content.
         """
         merged: List[str] = []
         current = ""
@@ -229,13 +231,15 @@ class GraphRAGRetriever:
 
         Optimizations:
         - Skips rebuild if Neo4j already has data with matching hash
-        - Merges small documents into larger batches to reduce LLM API calls
+        - Merges small documents into ~4000-char batches to reduce LLM API calls
+        - Parallel LLM extraction via SimpleLLMPathExtractor(num_workers=N)
+        - Async processing enabled (use_async=True)
         - Configurable max_triplets_per_chunk for extraction density
         - Includes embeddings for hybrid retrieval
 
         LlamaIndex will:
-        1. Chunk documents (using Settings.chunk_size)
-        2. Extract entities and relations via LLM (SchemaLLMPathExtractor)
+        1. Chunk documents (using Settings.chunk_size=2048)
+        2. Extract entities and relations via LLM (SimpleLLMPathExtractor)
         3. Store everything in Neo4j with embeddings
         """
         self.documents = documents
@@ -258,11 +262,12 @@ class GraphRAGRetriever:
         logger.info("Building knowledge graph from %d documents (hash=%s) via LlamaIndex...",
                      len(documents), dataset_hash)
 
-        # Merge small docs to reduce LLM calls
-        merged_docs = self._merge_small_docs(documents, target_size=2000)
+        # Merge small docs into larger batches to reduce total LLM calls
+        merged_docs = self._merge_small_docs(documents, target_size=self.DEFAULT_MERGE_TARGET)
         logger.info("Merged %d documents into %d batches for extraction "
-                     "(max_triplets_per_chunk=%d)",
-                     len(documents), len(merged_docs), self.max_triplets_per_chunk)
+                     "(triplets=%d, workers=%d)",
+                     len(documents), len(merged_docs),
+                     self.max_triplets_per_chunk, self.num_workers)
 
         # Clear old data and recreate graph store
         self._graph_store = self._create_graph_store()
@@ -278,14 +283,22 @@ class GraphRAGRetriever:
             for i, doc in enumerate(merged_docs)
         ]
 
-        # Build PropertyGraphIndex — triggers LLM extraction + embedding storage
+        # Create explicit extractor with parallel workers for speed
+        kg_extractor = SimpleLLMPathExtractor(
+            llm=self.llm,
+            max_paths_per_chunk=self.max_triplets_per_chunk,
+            num_workers=self.num_workers,
+        )
+
+        # Build PropertyGraphIndex — parallel LLM extraction + embedding storage
         self._index = PropertyGraphIndex.from_documents(
             llama_docs,
             property_graph_store=self._graph_store,
+            kg_extractors=[kg_extractor],
             llm=self.llm,
             embed_model=self.embed_model,
-            max_triplets_per_chunk=self.max_triplets_per_chunk,
-            include_embeddings=True,
+            embed_kg_nodes=True,
+            use_async=True,
             show_progress=True,
         )
 
