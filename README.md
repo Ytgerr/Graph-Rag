@@ -33,8 +33,6 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 ```
 
----
-
 ## Configuration
 
 ```bash
@@ -47,18 +45,6 @@ Edit `.env` and set your OpenRouter API key:
 OPENAI_API_KEY="sk-or-..."
 ```
 
-Other settings (with defaults):
-
-| Variable | Default | Description |
-|---|---|---|
-| `OPENAI_API_KEY` | (required) | OpenRouter API key |
-| `EMBEDDING_MODEL` | `openai/text-embedding-3-small` | Embedding model |
-| `NEO4J_URI` | `bolt://localhost:7687` | Neo4j connection URI |
-| `NEO4J_USER` | `neo4j` | Neo4j username |
-| `NEO4J_PASSWORD` | `password` | Neo4j password |
-| `CHROMA_PERSIST_DIR` | (empty = in-memory) | ChromaDB persistence path |
-
----
 
 ## Running
 
@@ -128,10 +114,6 @@ experiments/
 docker-compose.yml     Neo4j container configuration
 pyproject.toml         Project metadata and dependencies
 ```
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for a detailed explanation of how the system works.
-
----
 
 ## Resetting Neo4j
 
